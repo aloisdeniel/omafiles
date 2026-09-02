@@ -97,9 +97,13 @@ jobs:
             -o "contrib/release/omafiles-$VERSION.tar.gz" HEAD
 
       - name: Create unprivileged build user
-        # makepkg refuses to run as root.
+        # makepkg refuses to run as root. CARGO_HOME does not exist yet on a
+        # cold cache (rustup creates RUSTUP_HOME; cargo makes its own home
+        # only when it first writes there), so both are created before the
+        # chown.
         run: |
           useradd -m builder
+          install -d "$CARGO_HOME" "$RUSTUP_HOME"
           install -d -o builder "$GITHUB_WORKSPACE/dist"
           chown -R builder "$GITHUB_WORKSPACE" "$CARGO_HOME" "$RUSTUP_HOME"
 
