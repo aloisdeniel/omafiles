@@ -1,0 +1,198 @@
+# Prebuilt packages for Omarchy (Arch, x86_64).
+#
+# On a `v*` tag this builds a real pacman package inside an Arch container,
+# attaches it to a GitHub release together with a plain install tree, and, if
+# the AUR_SSH_PRIVATE_KEY secret exists, publishes `omafiles-bin` to the AUR.
+# A manual run builds the same package from the current commit and keeps it
+# as a workflow artifact only — nothing is released.
+#
+# Why an Arch container rather than the Ubuntu runner: it gives makepkg, so the
+# artifact is the same .pkg.tar.zst a user would build locally, and it matches
+# the glibc Omarchy ships. The gpui build is heavy (~15 min cold, ~5 warm), so
+# the cargo registry, the Zed git checkout and target/ are cached.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Shared between root (toolchain install, cache) and the unprivileged
+  # makepkg user. rust-cache honours CARGO_HOME; CARGO_TARGET_DIR keeps the
+  # build out of makepkg's throwaway src/ so the cache can see it.
+  CARGO_HOME: /opt/cargo
+  RUSTUP_HOME: /opt/rustup
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+jobs:
+  package:
+    name: Build pacman package
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha256: ${{ steps.dist.outputs.sha256 }}
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git rustup clang cmake pkgconf \
+            fontconfig freetype2 libxkbcommon libxkbcommon-x11 libxcb \
+            wayland vulkan-headers vulkan-icd-loader
+
+      - uses: actions/checkout@v4
+        with:
+          # The -git PKGBUILD's pkgver() and the snapshot version below both
+          # count commits.
+          fetch-depth: 0
+
+      - name: Determine version
+        id: version
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [[ "$version" != "$cargo_version" ]]; then
+              echo "::error::tag v$version does not match Cargo.toml version $cargo_version"
+              exit 1
+            fi
+          else
+            # Snapshot: pacman-legal (no hyphens), sorts after the base version.
+            version="$cargo_version.r$(git rev-list --count HEAD).g$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building omafiles $version"
+
+      - name: Install pinned Rust toolchain
+        # rustup reads rust-toolchain.toml (1.97.1, matching Zed) from the
+        # working directory; the Arch `rust` package would ignore that pin.
+        run: |
+          rustup toolchain install
+          cargo --version
+
+      - name: Cache cargo registry, git checkouts and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          # Only the release profile of this workspace is ever built here.
+          key: release-pkg
+
+      - name: Prepare sources for makepkg
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          sed -i "s/^pkgver=.*/pkgver=$VERSION/" contrib/release/PKGBUILD
+          # makepkg finds an existing source file next to the PKGBUILD and
+          # skips the download; the tarball is the tagged tree itself.
+          # (Run from the repository root: from a subdirectory `git archive`
+          # would only archive that subtree.)
+          git archive --format=tar.gz --prefix="omafiles-$VERSION/" \
+            -o "contrib/release/omafiles-$VERSION.tar.gz" HEAD
+
+      - name: Create unprivileged build user
+        # makepkg refuses to run as root.
+        run: |
+          useradd -m builder
+          install -d -o builder "$GITHUB_WORKSPACE/dist"
+          chown -R builder "$GITHUB_WORKSPACE" "$CARGO_HOME" "$RUSTUP_HOME"
+
+      - name: makepkg
+        working-directory: contrib/release
+        run: |
+          # -d: runtime deps (ffmpeg…) need not be present to build.
+          runuser -u builder -- env \
+            CARGO_HOME="$CARGO_HOME" RUSTUP_HOME="$RUSTUP_HOME" \
+            CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+            PKGDEST="$GITHUB_WORKSPACE/dist" \
+            makepkg -f -d --noconfirm
+
+      - name: Assemble release files
+        id: dist
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/dist"
+          # The plain tree, for the AUR -bin package and for `tar -C / -xzf`.
+          tar -C "$GITHUB_WORKSPACE/contrib/release/pkg/omafiles" \
+            -czf "omafiles-$VERSION-x86_64-linux.tar.gz" usr
+          sha256sum -- *.pkg.tar.zst *.tar.gz | tee SHA256SUMS
+          echo "sha256=$(sha256sum "omafiles-$VERSION-x86_64-linux.tar.gz" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          ls -la
+
+      - name: Smoke-test the binary
+        # Loads every dynamic library the binary links; no display needed.
+        run: |
+          tar -xzf dist/omafiles-*-x86_64-linux.tar.gz -C /tmp
+          ldd /tmp/usr/bin/omafiles
+          ! ldd /tmp/usr/bin/omafiles | grep 'not found'
+          /tmp/usr/bin/omafiles --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omafiles-${{ steps.version.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            Prebuilt for Omarchy (Arch Linux, x86_64).
+
+            ```sh
+            sudo pacman -U omafiles-${{ steps.version.outputs.version }}-1-x86_64.pkg.tar.zst
+            ```
+
+  aur:
+    name: Publish omafiles-bin to the AUR
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for AUR credentials
+        id: creds
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [[ -n "$AUR_SSH_PRIVATE_KEY" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::AUR_SSH_PRIVATE_KEY is not set; skipping AUR publish."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.creds.outputs.enabled == 'true'
+
+      - name: Render PKGBUILD
+        if: steps.creds.outputs.enabled == 'true'
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+          SHA256: ${{ needs.package.outputs.sha256 }}
+        run: |
+          sed -e "s/@VERSION@/$VERSION/" -e "s/@SHA256@/$SHA256/" \
+            contrib/aur/PKGBUILD > PKGBUILD
+          cat PKGBUILD
+
+      - name: Push to aur.archlinux.org
+        if: steps.creds.outputs.enabled == 'true'
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
+        with:
+          pkgname: omafiles-bin
+          pkgbuild: ./PKGBUILD
+          commit_username: Alois Deniel
+          commit_email: alois.deniel@gmail.com
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: Update to ${{ needs.package.outputs.version }}
+          ssh_keyscan_types: rsa,ecdsa,ed25519

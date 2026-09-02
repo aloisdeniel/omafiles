@@ -1,0 +1,6 @@
+[toolchain]
+# Matches Zed's own rust-toolchain.toml. gpui is a git dependency on an
+# unstable framework: a toolchain mismatch will read as a gpui bug.
+channel = "1.97.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

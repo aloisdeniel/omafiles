@@ -1,0 +1,26 @@
+# Used only when Omarchy is absent or its theme directory is mid-swap.
+# Deliberately neutral: this should never be mistaken for an Omarchy theme.
+mode = "dark"
+
+accent = "#7aa2f7"
+selection = "#292e42"
+muted = "#414868"
+
+background = "#16161e"
+dark_background = "#101014"
+darker_background = "#0a0a0d"
+lighter_background = "#1f1f28"
+
+foreground = "#c0c0cc"
+dark_foreground = "#6a6a7a"
+light_foreground = "#d4d4de"
+bright_foreground = "#f0f0f5"
+
+red = "#f7768e"
+yellow = "#e0af68"
+orange = "#eb927b"
+green = "#9ece6a"
+cyan = "#449dab"
+blue = "#7aa2f7"
+magenta = "#ad8ee6"
+brown = "#75493d"

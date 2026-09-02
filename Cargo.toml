@@ -1,0 +1,96 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/omarchy-tokens",
+    "crates/omarchy-ui",
+    "crates/omafiles",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/aloisdeniel/omafiles"
+
+[workspace.dependencies]
+# gpui is Zed's internal framework, not a stable public library.
+#
+# ⚠ gpui floats ON PURPOSE and Cargo.lock is the pin. gpui-component declares
+# `gpui = { git = ".../zed" }` with no rev, and Cargo treats a rev-pinned source
+# and a floating one as DIFFERENT sources — it does not unify them. Pinning our
+# side puts two incompatible copies of gpui in one graph and the build dies with
+# `expected gpui::app::App, found App` (upstream gpui-component #2532; verified
+# here, not taken on faith). `[patch]` cannot fix it either — Cargo rejects a
+# patch that points at the same source.
+#
+# So gpui floats to match, and the committed Cargo.lock does the pinning. That is
+# reproducible for an application; `cargo update -p gpui` is the deliberate bump,
+# and it is the moment to re-run the M0 checks. See plan/GPUI-NOTES.md §9.
+#
+# The "wayland" feature is NOT optional on Linux: without a windowing feature
+# gpui_linux::current_platform hits unreachable!() and the app dies at startup.
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
+    "wayland",
+] }
+
+# gpui-component is a different repo, so it has no unification problem and stays
+# rev-pinned — we take its changes deliberately. Apache-2.0, unlike every Zed
+# crate above gpui, which is GPL-3.0-or-later.
+#
+# The grammar set is opt-in per language rather than the blanket
+# `tree-sitter-languages` feature: that one pulls 35 C grammars, and every one is
+# a compile the build pays for whether or not a file of that kind is ever opened.
+# This is PLAN.md §6.5's "start with a small grammar set and grow it", made
+# literal. `diff` is here early because M8's diff view needs it and it costs
+# almost nothing. `json` comes with the base `tree-sitter` feature.
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "5cb0946", features = [
+    "tree-sitter",
+    "tree-sitter-bash",
+    "tree-sitter-c",
+    "tree-sitter-cpp",
+    "tree-sitter-css",
+    "tree-sitter-diff",
+    "tree-sitter-go",
+    "tree-sitter-html",
+    "tree-sitter-javascript",
+    "tree-sitter-lua",
+    "tree-sitter-markdown",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-toml",
+    "tree-sitter-tsx",
+    "tree-sitter-typescript",
+    "tree-sitter-yaml",
+] }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "5cb0946" }
+
+omarchy-tokens = { path = "crates/omarchy-tokens" }
+omarchy-ui = { path = "crates/omarchy-ui" }
+
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+# Only to render the Zed-format theme JSON that gpui-component's HighlightTheme
+# deserialises; see omarchy-ui/src/syntax.rs.
+serde_json = "1"
+toml = "1"
+notify = "8"
+futures = "0.3"
+nucleo = "0.5"
+ignore = "0.4"
+
+# M10's HTTP server (§6.7): in-process, so stopping is a drop, status is read
+# from the same process, and there is no orphaned pid. axum brings tokio; the
+# runtime lives on one background thread owned by `omafiles::server`.
+axum = "0.8"
+tokio = { version = "1", features = ["rt", "net"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs"] }
+
+[profile.dev]
+# gpui's dependency tree is large; without this a debug build is painfully slow
+# to run. Optimise dependencies but keep our own crates debuggable.
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 2

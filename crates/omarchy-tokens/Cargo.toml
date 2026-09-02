@@ -1,0 +1,16 @@
+[package]
+name = "omarchy-tokens"
+description = "Reads the live Omarchy design tokens: palette, typography, spacing, geometry."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Deliberately no gpui dependency. This crate must build and test headless in
+# seconds so the conformance suite can run over every stock theme in CI.
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+toml.workspace = true
+notify.workspace = true

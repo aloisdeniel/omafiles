@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>omafiles — the file explorer Omarchy was missing</title>
+<meta name="description" content="omafiles is the modern, keyboard-first file explorer for omarchs: serve a directory, ask an agent, read a diff, find by content — inside your Omarchy setup.">
+<meta name="theme-color" content="#1a1b26">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,600;0,800;1,400&display=swap" rel="stylesheet">
+<style>
+  /* The app's own icons: JetBrainsMono Nerd Font (OFL-1.1, symbols MIT),
+     subset to the handful of glyphs this page draws (5 KB). Listed after
+     JetBrains Mono in the stack, so the private-use codepoints fall
+     through to it per glyph.                                             */
+  @font-face{
+    font-family:"NerdIcons";
+    src:url("fonts/omafiles-icons.woff2") format("woff2");
+    font-display:swap;
+  }
+  /* ---------------------------------------------------------------------
+     Every colour on this page is a key from Omarchy's tokyo-night
+     colors.toml, named as it is there. Nothing is invented; the page is
+     what the app looks like on that theme. Alphas mirror the app's
+     [controls] fills: 0.04 normal, 0.08 hover, 0.16 selected.          */
+  :root{
+    --background:#1a1b26; --dark-background:#13141c; --darker-background:#0e0e14;
+    --lighter-background:#24283b; --selection:#292e42; --muted:#414868;
+    --foreground:#a9b1d6; --dark-foreground:#565f89; --light-foreground:#b4bee6;
+    --bright-foreground:#c0caf5;
+    --accent:#7aa2f7; --blue:#7aa2f7; --magenta:#bb9af7; --cyan:#0db9d7;
+    --green:#9ece6a; --yellow:#e0af68; --orange:#ff9e64; --red:#f7768e;
+
+    --hairline:color-mix(in srgb, var(--foreground) 12%, transparent);
+    --fill-1:color-mix(in srgb, var(--foreground) 4%, transparent);
+    --fill-2:color-mix(in srgb, var(--foreground) 8%, transparent);
+    --fill-3:color-mix(in srgb, var(--foreground) 16%, transparent);
+    --mono:"JetBrains Mono","NerdIcons",ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+    --rail:150px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth;color-scheme:dark}
+  @media (prefers-reduced-motion: reduce){ html{scroll-behavior:auto} *{transition:none!important;animation:none!important} }
+  body{
+    background:var(--background); color:var(--foreground);
+    font-family:var(--mono); font-size:15px; line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline;text-underline-offset:3px}
+  a:focus-visible,button:focus-visible{outline:1px solid var(--accent);outline-offset:2px}
+  ::selection{background:var(--selection);color:var(--bright-foreground)}
+  b{color:var(--bright-foreground);font-weight:600}
+
+  .wrap{max-width:1100px;margin:0 auto;padding:0 24px}
+
+  /* top bar ------------------------------------------------------------ */
+  header.top{position:sticky;top:0;z-index:5;background:color-mix(in srgb, var(--background) 86%, transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--hairline)}
+  .top-row{display:flex;align-items:center;gap:22px;padding:11px 0;font-size:13.5px}
+  .brand{color:var(--bright-foreground);font-weight:600;font-size:14.5px}
+  .brand::before{content:"❯ ";color:var(--green)}
+  nav.links{display:flex;gap:18px;margin-left:auto}
+  nav.links a{color:var(--dark-foreground)}
+  nav.links a:hover{color:var(--cyan);text-decoration:none}
+  .gh{color:var(--foreground);border:1px solid var(--hairline);border-radius:2px;padding:3px 10px}
+  .gh:hover{background:var(--fill-2);text-decoration:none}
+  @media (max-width:560px){ nav.links{display:none} .top-row .gh{margin-left:auto} }
+
+  /* hero --------------------------------------------------------------- */
+  .hero{padding-top:84px}
+  h1{font-size:clamp(34px,6vw,66px);line-height:1.06;font-weight:800;letter-spacing:-.03em;color:var(--bright-foreground);max-width:26ch;text-wrap:balance}
+  h1 span{display:block;color:var(--orange)}
+  .lede{margin:28px 0 30px;font-size:16px;color:var(--light-foreground)}
+  .cta-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .btn{display:inline-block;border:1px solid var(--hairline);border-radius:2px;padding:9px 18px;color:var(--bright-foreground);font-size:14px}
+  .btn:hover{background:var(--fill-2);border-color:color-mix(in srgb, var(--magenta) 50%, transparent);text-decoration:none}
+  .btn.primary{background:var(--orange);border-color:var(--orange);color:var(--darker-background);font-weight:600}
+  .btn.primary:hover{background:color-mix(in srgb, var(--orange) 88%, white)}
+
+  /* the stage: the window replica on a glow borrowed from the theme's
+     own wallpapers — the one place this page allows itself a flourish.  */
+  .stage{position:relative;margin:64px 0 0;padding-bottom:64px;border-bottom:1px solid var(--hairline);isolation:isolate}
+  .stage::before{
+    content:"";position:absolute;inset:-60px -40px 20px;z-index:-1;pointer-events:none;
+    background:
+      radial-gradient(60% 55% at 22% 18%, color-mix(in srgb, var(--magenta) 32%, transparent), transparent 70%),
+      radial-gradient(55% 60% at 82% 78%, color-mix(in srgb, var(--blue) 26%, transparent), transparent 70%),
+      radial-gradient(40% 40% at 60% 30%, color-mix(in srgb, var(--cyan) 12%, transparent), transparent 70%),
+      radial-gradient(30% 30% at 50% 95%, color-mix(in srgb, var(--orange) 14%, transparent), transparent 70%);
+    filter:blur(24px);
+  }
+  .demo{border:1px solid color-mix(in srgb, var(--foreground) 18%, transparent);border-radius:4px;overflow:hidden;background:var(--background);box-shadow:0 40px 90px -30px var(--darker-background);font-size:12.5px;line-height:1.5}
+  .demo .cap{font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--dark-foreground)}
+  .body{display:grid;grid-template-columns:172px 1fr;border-bottom:1px solid var(--hairline)}
+  .col{min-width:0;display:flex;flex-direction:column}
+  .col+.col{border-left:1px solid var(--hairline)}
+  .bar{display:flex;align-items:center;gap:4px;padding:4px;height:32px;border-bottom:1px solid var(--hairline);flex:none}
+  .quiet{margin-left:auto;width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;color:var(--dark-foreground);flex:none}
+  .navbtn{min-width:24px;height:24px;padding:0 6px;display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid var(--hairline);border-radius:2px;color:var(--dark-foreground);flex:none;font-size:11px}
+  .navbtn.on{color:var(--accent);border-color:color-mix(in srgb, var(--accent) 40%, transparent)}
+  .crumb{flex:1;min-width:0;white-space:nowrap;overflow:hidden;color:var(--dark-foreground);padding:0 8px}
+  .crumb b{color:var(--bright-foreground)}
+  .cols{display:grid;grid-template-columns:1fr 244px;min-height:392px;flex:1}
+  .pane{min-width:0}
+  .pane+.pane{border-left:1px solid var(--hairline)}
+  .side .cap{padding:8px 12px 2px}
+  .side .rule{border-top:1px solid var(--hairline);margin-top:10px}
+  .side .cap.ws{display:flex;align-items:center}
+  .side .cap .plus{margin-left:auto;letter-spacing:0}
+  .side .cap.group{display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-size:11.5px;padding-top:6px}
+  .side .cap.group.on{color:var(--foreground)}
+  .side .cap .chev{font-size:9px;width:.8em}
+  .rowi{display:flex;gap:8px;align-items:center;padding:4px 12px;color:var(--dark-foreground);white-space:nowrap;overflow:hidden}
+  .rowi .ico{flex:none;width:1.2em}
+  .rowi.sel{background:var(--fill-3);color:var(--bright-foreground)}
+  .rowi.sel .ico{color:var(--accent)}
+  .rowi.tab{padding-right:4px}
+  .rowi .x{margin-left:auto;color:var(--dark-foreground);width:20px;text-align:center;font-size:11px;opacity:0}
+  .rowi.sel .x{opacity:1}
+  .rowi.faint{opacity:.55}
+  .listhead{display:flex;padding:6px 12px;border-bottom:1px solid var(--hairline)}
+  .listhead span:last-child,.rowe span.meta{margin-left:auto;color:var(--dark-foreground)}
+  .rowe{display:flex;gap:8px;padding:4px 12px;color:var(--dark-foreground);white-space:nowrap;overflow:hidden}
+  .rowe .ico{flex:none;width:1.2em}
+  .rowe.dir{color:var(--foreground)}
+  .rowe.dir .ico{color:var(--blue)}
+  .rowe.cur{background:var(--fill-2);color:var(--bright-foreground)}
+  .rowe.cur .ico{color:var(--accent)}
+  .mark{font-weight:600}
+  .m-mod{color:var(--yellow)} .m-new{color:var(--green)} .m-del{color:var(--red)}
+  .detail .cover{background:var(--dark-background);padding:14px 12px;color:var(--foreground);font-size:11.5px;border-bottom:1px solid var(--hairline)}
+  .detail .info{padding:8px 12px 10px}
+  .detail .acts{display:flex;flex-wrap:wrap;gap:4px;padding:8px 12px;border-top:1px solid var(--hairline)}
+  .minibtn{border:1px solid var(--hairline);border-radius:2px;padding:1px 7px;font-size:11px;color:var(--foreground)}
+  .minibtn .g{color:var(--dark-foreground)}
+  .fact{display:flex;justify-content:space-between;font-size:11.5px}
+  .fact span:first-child{color:var(--dark-foreground)}
+  .fname{color:var(--bright-foreground);margin:2px 0 4px}
+  .status{display:flex;align-items:center;gap:4px;padding:4px 4px 4px 18px;font-size:11.5px;color:var(--dark-foreground);flex-wrap:wrap}
+  .badge{border:1px solid var(--hairline);border-radius:2px;padding:1px 7px;display:inline-flex;gap:6px;align-items:center}
+  .badge .g{color:var(--dark-foreground)}
+  .badge.on{color:var(--accent);border-color:color-mix(in srgb, var(--accent) 40%, transparent)}
+  .git b{color:var(--bright-foreground)}
+  .spacer{flex:1}
+  @media (max-width:820px){ .body{grid-template-columns:1fr}.col.side{display:none}.cols{grid-template-columns:1fr}.pane.detail{display:none} }
+
+  /* syntax colours, the same ones the app's tree-sitter preview uses */
+  .t-sec{color:var(--magenta)} .t-key{color:var(--blue)} .t-str{color:var(--green)}
+  .t-num{color:var(--orange)} .t-cmt{color:var(--dark-foreground);font-style:italic} .t-op{color:var(--cyan)}
+
+
+  /* sections: a rail with the TOML table header, content beside it ---- */
+  section{padding:64px 0;border-bottom:1px solid var(--hairline)}
+  section .wrap{display:grid;grid-template-columns:var(--rail) minmax(0,1fr);gap:24px}
+  .rail{color:var(--magenta);font-size:14px;padding-top:6px}
+  #features .rail{color:var(--blue)} #facts .rail{color:var(--green)} #install .rail{color:var(--orange)}
+  .rail::before{content:"[";color:var(--dark-foreground)} .rail::after{content:"]";color:var(--dark-foreground)}
+  h2{font-size:clamp(24px,3vw,32px);line-height:1.2;color:var(--bright-foreground);font-weight:600;letter-spacing:-.015em;margin-bottom:12px}
+  .sub{color:var(--foreground)}
+  @media (max-width:700px){ section .wrap{grid-template-columns:1fr;gap:10px} section{padding:52px 0} }
+
+  /* why ---------------------------------------------------------------- */
+  .why p{margin-top:16px}
+  blockquote.pull{margin:28px 0 8px;padding-left:22px;border-left:2px solid var(--magenta)}
+  blockquote.pull p{margin:0;font-size:clamp(22px,3vw,30px);font-weight:600;color:var(--magenta);line-height:1.3;max-width:none}
+  blockquote.pull cite{display:block;margin-top:6px;font-style:normal;font-size:12.5px;color:var(--dark-foreground)}
+
+  /* features as a directory listing ----------------------------------- */
+  .listing{border-top:1px solid var(--hairline);margin-top:26px}
+  .feat{display:grid;grid-template-columns:14ch minmax(0,1fr) auto;gap:16px;align-items:baseline;padding:12px 8px;border-bottom:1px solid var(--hairline)}
+  .feat:hover{background:var(--fill-1)}
+  .feat .name{color:var(--blue)}
+  .feat .name::before{content:" ";color:var(--dark-foreground)}
+  .feat .what{color:var(--foreground)}
+  .feat .key{color:var(--cyan);font-size:12px;border:1px solid color-mix(in srgb, var(--cyan) 35%, transparent);border-radius:2px;padding:0 7px;align-self:center;white-space:nowrap}
+  @media (max-width:640px){ .feat{grid-template-columns:1fr auto} .feat .what{grid-column:1 / -1} }
+
+  /* facts as the file the app reads ------------------------------------ */
+  pre{font-family:inherit;white-space:pre;overflow-x:auto}
+  pre.file{background:var(--dark-background);border:1px solid var(--hairline);border-radius:4px;padding:18px 22px;font-size:13.5px;line-height:1.85;margin-top:22px}
+  pre.file .t-cmt{padding-left:1ch}
+  .fileh{display:flex;align-items:center;gap:8px;margin-top:22px;padding:6px 12px;background:var(--dark-background);border:1px solid var(--hairline);border-bottom:0;border-radius:4px 4px 0 0;font-size:12px;color:var(--dark-foreground)}
+  .fileh+pre.file{margin-top:0;border-radius:0 0 4px 4px}
+  .fileh b{color:var(--foreground);font-weight:400}
+
+  /* install ------------------------------------------------------------ */
+  pre.term{background:var(--darker-background);border:1px solid var(--hairline);border-radius:4px;padding:18px 22px;font-size:13.5px;line-height:1.9;margin-top:22px;color:var(--bright-foreground)}
+  pre.term .p{color:var(--green)} pre.term .c{color:var(--dark-foreground)} pre.term .f{color:var(--cyan)}
+  .after{margin-top:16px;font-size:13.5px;color:var(--dark-foreground)}
+  .after b{color:var(--foreground)}
+
+  footer{padding:28px 0 56px;color:var(--dark-foreground);font-size:13px}
+  footer .wrap{display:flex;gap:20px;flex-wrap:wrap}
+  footer .spacer{flex:1}
+  footer a{color:var(--foreground)} footer a:hover{color:var(--cyan)}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap top-row">
+    <a class="brand" href="#" style="color:inherit">omafiles</a>
+    <nav class="links" aria-label="Sections">
+      <a href="#why">why</a>
+      <a href="#features">features</a>
+      <a href="#facts">facts</a>
+      <a href="#install">install</a>
+    </nav>
+    <a class="gh" href="https://github.com/aloisdeniel/omafiles">GitHub</a>
+  </div>
+</header>
+
+<main>
+  <div class="wrap hero">
+    <h1>The file explorer <span>Omarchy was missing.</span></h1>
+    <p class="lede">
+      A modern, keyboard-first explorer built for omarchs. Serve a directory in
+      a keystroke, ask an agent about a file, read a diff where the preview
+      goes, find by name and content in one window. It runs on Omarchy's own
+      scripts and tokens, so it looks and behaves like the rest of your desktop.
+    </p>
+    <div class="cta-row">
+      <a class="btn primary" href="#install">Install</a>
+      <a class="btn" href="https://github.com/aloisdeniel/omafiles">Read the source</a>
+    </div>
+
+    <!-- the app, rebuilt in DOM, in Tokyo Night -->
+    <div class="stage">
+      <div class="demo" role="img" aria-label="The omafiles window in Tokyo Night: sidebar with places and workspace tabs under its own tool bar, listing with git markers under the navigation bar, a detail panel with the preview, facts and actions, and the status bar.">
+        <div class="body">
+          <div class="col side">
+            <div class="bar">
+              <span class="navbtn">&#xf002;</span><span class="navbtn on">&#xf0ac; 1</span>
+              <span class="quiet">&#xf100;</span>
+            </div>
+            <div class="pane side">
+              <div class="cap">places</div>
+              <div class="rowi"><span class="ico">&#xf015;</span>Home</div>
+              <div class="rowi"><span class="ico">&#xf07b;</span>Downloads</div>
+              <div class="rowi"><span class="ico">&#xf013;</span>.config</div>
+              <div class="cap">network</div>
+              <div class="rowi"><span class="ico">&#xf233;</span>media on nas.local</div>
+              <div class="rule"></div>
+              <div class="cap ws"><span>workspaces</span><span class="plus">&#xf067;</span></div>
+              <div class="cap group on"><span class="chev">&#xf107;</span>client x</div>
+              <div class="rowi tab sel"><span class="ico">&#xf114;</span>omafiles<span class="x">&#xf00d;</span></div>
+              <div class="rowi tab"><span class="ico">&#xf114;</span>omarchy<span class="x">&#xf00d;</span></div>
+              <div class="cap group"><span class="chev">&#xf105;</span>home</div>
+              <div class="rowi faint"><span class="ico">&#xf067;</span>New tab</div>
+            </div>
+          </div>
+          <div class="col main">
+            <div class="bar">
+              <span class="navbtn">&#xf060;</span><span class="navbtn">&#xf062;</span>
+              <span class="crumb">~ / Documents / Github / <b>omafiles</b></span>
+            </div>
+            <div class="cols">
+              <div class="pane list">
+                <div class="listhead cap"><span>name</span><span>size · age</span></div>
+                <div class="rowe dir"><span class="ico">&#xf07b;</span>.github <span class="mark m-new">+</span><span class="meta">— · 1h</span></div>
+                <div class="rowe dir"><span class="ico">&#xf07b;</span>contrib <span class="mark m-mod">•</span><span class="meta">— · 1h</span></div>
+                <div class="rowe dir"><span class="ico">&#xf07b;</span>crates <span class="mark m-mod">•</span><span class="meta">— · 2m</span></div>
+                <div class="rowe dir"><span class="ico">&#xf07b;</span>docs <span class="mark m-new">+</span><span class="meta">— · 1h</span></div>
+                <div class="rowe dir"><span class="ico">&#xf07b;</span>plan<span class="meta">— · 1d</span></div>
+                <div class="rowe dir"><span class="ico">&#xf07b;</span>website <span class="mark m-mod">•</span><span class="meta">— · now</span></div>
+                <div class="rowe cur"><span class="ico">&#xf15b;</span>Cargo.toml <span class="mark m-mod">•</span><span class="meta">3.7 K · 2m</span></div>
+                <div class="rowe"><span class="ico">&#xf15b;</span>Cargo.lock<span class="meta">220 K · 2m</span></div>
+                <div class="rowe"><span class="ico">&#xf15b;</span>LICENSE<span class="meta">1.1 K · 1h</span></div>
+                <div class="rowe"><span class="ico">&#xf15b;</span>README.md<span class="meta">1.4 K · 1h</span></div>
+                <div class="rowe"><span class="ico">&#xf15b;</span>rust-toolchain.toml<span class="meta">226 B · 9d</span></div>
+              </div>
+              <div class="pane detail">
+                <div class="cover"><span class="t-sec">[workspace]</span><br><span class="t-key">resolver</span> <span class="t-op">=</span> <span class="t-str">"2"</span><br><span class="t-key">members</span> <span class="t-op">=</span> [<br>&nbsp;&nbsp;<span class="t-str">"crates/omarchy-tokens"</span>,<br>&nbsp;&nbsp;<span class="t-str">"crates/omarchy-ui"</span>,<br>&nbsp;&nbsp;<span class="t-str">"crates/omafiles"</span>,<br>]</div>
+                <div class="info">
+                  <div class="fname">Cargo.toml</div>
+                  <div class="fact"><span>kind</span><span>toml</span></div>
+                  <div class="fact"><span>size</span><span>3.7 K</span></div>
+                  <div class="fact"><span>modified</span><span>2m</span></div>
+                  <div class="fact"><span>lines</span><span>96</span></div>
+                </div>
+                <div class="acts">
+                  <span class="minibtn"><span class="g">&#xf08e;</span> Open</span>
+                  <span class="minibtn"><span class="g">&#xf06a9;</span> Agent</span>
+                  <span class="minibtn"><span class="g">&#xf1e0;</span> Share</span>
+                  <span class="minibtn"><span class="g">&#xf0c5;</span> Copy</span>
+                  <span class="minibtn"><span class="g">&#xf061;</span> Move</span>
+                  <span class="minibtn"><span class="g">&#xf1c6;</span> Zip</span>
+                  <span class="minibtn"><span class="g">&#xf06e;</span> Preview</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="status">
+          <span>6 directories · 5 files</span>
+          <span class="git"> <b>develop</b> <span class="m-new">+2</span> <span class="m-mod">•4</span></span>
+          <span class="spacer"></span>
+          <span class="badge on"><span class="g">&#xf0ac;</span>:8080</span>
+          <span class="badge"><span class="g">&#xf08d;</span>Pin</span>
+          <span class="badge"><span class="g">&#xf120;</span>Terminal</span>
+          <span class="badge"><span class="g">&#xf06a9;</span>Agent</span>
+          <span class="badge"><span class="g">&#xf1e0;</span>Share</span>
+          <span class="badge"><span class="g">&#xf067;</span>New file</span>
+          <span class="badge"><span class="g">?</span>Help</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <section id="why" class="why">
+    <div class="wrap">
+      <div class="rail">why</div>
+      <div>
+        <h2>Why another file explorer?</h2>
+        <blockquote class="pull">
+          <p>“We can fix everything.”</p>
+          <cite>The spirit this whole thing runs on.</cite>
+        </blockquote>
+        <p>
+          The macOS explorer has felt outdated for ten years now: the same
+          window, the same limits, nothing that reads as modern. The Linux
+          explorers, capable as they are, lack just a little ambition and
+          visual customization to really fit on Omarchy. They stay too
+          inspired by Apple's and Microsoft's, instead of providing the
+          features that make a developer's life easier.
+        </p>
+        <p>
+          omafiles starts from the other end: <b>serve a directory in a
+          keystroke</b>, <b>ask an agent about a file</b>, <b>read a diff
+          where a preview goes</b>, <b>find by name and content in one
+          window</b>. And it does all of it through Omarchy's own scripts and
+          tokens, so it feels like part of the system rather than a guest.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="wrap">
+      <div class="rail">features</div>
+      <div>
+        <h2>Everything is a keystroke.</h2>
+        <p class="sub">Vim-ish movement, key contexts per pane, a command palette, and a keymap you can rebind from a TOML file. The mouse gets the same verbs, never more.</p>
+        <div class="listing">
+          <div class="feat"><span class="name">find</span><span class="what">One window for everything below here: recent files when empty, fuzzy names as you type, then content matches via ripgrep, deduplicated.</span><span class="key">/</span></div>
+          <div class="feat"><span class="name">preview</span><span class="what">Images, video posters, markdown, and code through tree-sitter. Colored by your palette, expandable over the listing, browsable with j and k.</span><span class="key">space</span></div>
+          <div class="feat"><span class="name">git</span><span class="what">Branch and change counts in the status bar, markers on entry icons, and a changed file previews as its diff, rendered as the file rather than the patch.</span><span class="key">^⇧g</span></div>
+          <div class="feat"><span class="name">serve</span><span class="what">Serve any directory over HTTP in one keystroke. Servers are detached processes: close the window, they keep answering. A globe lists them all.</span><span class="key">^s</span></div>
+          <div class="feat"><span class="name">act</span><span class="what">Terminal here, agent chat about a file, share via LocalSend, copy, paste, zip. All through Omarchy's own scripts, so your defaults hold.</span><span class="key">t a s z</span></div>
+          <div class="feat"><span class="name">vertical tabs</span><span class="what">Tabs live in the sidebar, the way modern tools stack them. Each carries its own history and cursor, and everything restores across restarts and syncs across windows.</span><span class="key">^t</span></div>
+          <div class="feat"><span class="name">workspaces</span><span class="what">Group tabs by project in the sidebar. Drag tabs between groups, collapse a group you are not in, and the one holding your active tab lights up.</span><span class="key">^n</span></div>
+          <div class="feat"><span class="name">network</span><span class="what">SMB, SFTP, WebDAV through GVfs. A mount is just a directory: the listing, preview and search browse it with no special cases.</span><span class="key">^⇧n</span></div>
+          <div class="feat"><span class="name">palette</span><span class="what">Every action by name with its effective binding, including the ones you rebound in keymap.toml.</span><span class="key">^k</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="facts">
+    <div class="wrap">
+      <div class="rail">facts</div>
+      <div>
+        <h2>Small, native, honest.</h2>
+        <p class="sub">A Rust workspace of three crates: pure token logic, a gpui design system, and the app. The token resolver is conformance-tested against Omarchy's own tooling on all 22 stock themes.</p>
+        <div class="fileh"><span></span><b>omafiles.toml</b></div>
+<pre class="file"><span class="t-sec">[omafiles]</span>
+<span class="t-key">language</span> <span class="t-op">=</span> <span class="t-str">"Rust"</span>
+<span class="t-key">ui</span>       <span class="t-op">=</span> <span class="t-str">"gpui"</span>          <span class="t-cmt"># the toolkit Zed is built on</span>
+<span class="t-key">themes</span>   <span class="t-op">=</span> <span class="t-num">22</span>              <span class="t-cmt"># every stock Omarchy theme, live</span>
+<span class="t-key">tests</span>    <span class="t-op">=</span> <span class="t-num">222</span>
+<span class="t-key">license</span>  <span class="t-op">=</span> <span class="t-str">"MIT"</span>
+<span class="t-key">keymap</span>   <span class="t-op">=</span> <span class="t-str">"~/.config/omafiles/keymap.toml"</span></pre>
+      </div>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="wrap">
+      <div class="rail">install</div>
+      <div>
+        <h2>Install it on your Omarchy.</h2>
+        <p class="sub">A prebuilt pacman package for x86_64: one binary, a .desktop entry, and opt-in snippets for the SUPER+SHIFT+F takeover. Nothing writes into your home directory unasked.</p>
+<pre class="term"><span class="p">❯</span> curl <span class="f">-LO</span> https://github.com/aloisdeniel/omafiles/releases/latest/download/omafiles-0.0.1-1-x86_64.pkg.tar.zst
+<span class="p">❯</span> sudo pacman <span class="f">-U</span> omafiles-0.0.1-1-x86_64.pkg.tar.zst</pre>
+        <p class="after">Then open it from the launcher, or bind <b>SUPER+SHIFT+F</b> using the snippet in <b>contrib</b>. Prefer to build it yourself? <b>git clone</b> the repo and run <b>makepkg -si</b> in <b>contrib</b>.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>omafiles, MIT licensed</span>
+    <span class="spacer"></span>
+    <a href="https://github.com/aloisdeniel/omafiles">source</a>
+    <a href="https://omarchy.org">omarchy</a>
+  </div>
+</footer>
+</body>
+</html>

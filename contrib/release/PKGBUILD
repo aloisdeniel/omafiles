@@ -1,0 +1,54 @@
+# Maintainer: Alois Deniel
+#
+# The *versioned* package, built by .github/workflows/release.yml on every
+# `v*` tag and attached to the GitHub release as omafiles-<ver>-1-x86_64.pkg.tar.zst.
+# The workflow rewrites `pkgver=` from the tag and drops the source tarball
+# (a `git archive` of the tagged commit) next to this file, so makepkg never
+# downloads anything. `contrib/PKGBUILD` is the -git variant for local HEAD
+# builds; keep the two package() functions in step.
+#
+# Install a downloaded package with:  sudo pacman -U omafiles-*.pkg.tar.zst
+
+pkgname=omafiles
+pkgver=0.0.1
+pkgrel=1
+pkgdesc="Keyboard-first file explorer for Omarchy"
+arch=('x86_64')
+url="https://github.com/aloisdeniel/omafiles"
+license=('MIT')
+# git: branch reads and switching. ffmpeg: video posters.
+# Everything else the app shells out to ships with Omarchy itself.
+depends=('git' 'ffmpeg' 'xdg-utils' 'glib2' 'wl-clipboard')
+makedepends=('cargo' 'clang' 'cmake' 'pkgconf')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+# The workflow generates the tarball locally; a checksum of a file we just
+# produced ourselves would only ever verify the disk.
+sha256sums=('SKIP')
+# Arch's default makepkg.conf enables `debug`, which appends `-C debuginfo=2`
+# to RUSTFLAGS for all ~950 crates and splits out a -debug package, and `lto`,
+# which puts -flto=auto in CFLAGS so the C grammars tree-sitter compiles turn
+# into GCC bitcode that rust-lld cannot link (verified: undefined ts_* symbols).
+options=('!debug' '!lto')
+
+build() {
+  cd "$pkgname-$pkgver"
+  # --locked: Cargo.lock is the gpui pin (PLAN.md §8) — an unlocked build
+  # floats gpui to whatever Zed pushed today.
+  cargo build --release --locked -p omafiles
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  local bin="${CARGO_TARGET_DIR:-target}/release/omafiles"
+  install -Dm755 "$bin" "$pkgdir/usr/bin/omafiles"
+  # Named after the app_id so Wayland can associate window and entry.
+  install -Dm644 contrib/omafiles.desktop \
+    "$pkgdir/usr/share/applications/dev.omarchy.omafiles.desktop"
+  # Reference copies of the opt-in user configuration.
+  install -Dm755 contrib/hooks/omafiles-theme-reload \
+    "$pkgdir/usr/share/omafiles/hooks/omafiles-theme-reload"
+  install -Dm644 contrib/hypr-bindings.lua \
+    "$pkgdir/usr/share/omafiles/hypr-bindings.lua"
+  install -Dm644 contrib/README.md "$pkgdir/usr/share/omafiles/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

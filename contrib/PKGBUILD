@@ -1,0 +1,57 @@
+# Maintainer: Alois Deniel
+#
+# Builds from the repository's current HEAD. From a checkout:
+#
+#   cd contrib && makepkg -si
+#
+# The theme-reload hook and the Hyprland bindings are user configuration and
+# are deliberately NOT installed into $HOME by the package — see the
+# post-install message and contrib/README.md.
+
+pkgname=omafiles-git
+pkgver=r21.c7d8c92
+pkgrel=1
+pkgdesc="Keyboard-first file explorer for Omarchy"
+arch=('x86_64')
+url="https://github.com/aloisdeniel/omafiles"
+license=('MIT')
+# git: branch reads and switching (M8). ffmpeg: video posters (M7).
+# Everything else the app shells out to ships with Omarchy itself.
+depends=('git' 'ffmpeg' 'xdg-utils' 'glib2' 'wl-clipboard')
+makedepends=('rust')
+provides=('omafiles')
+conflicts=('omafiles')
+# Arch's default makepkg.conf enables `debug`, which appends `-C debuginfo=2`
+# to RUSTFLAGS for all ~950 crates and splits out a -debug package, and `lto`,
+# which puts -flto=auto in CFLAGS so the C grammars tree-sitter compiles turn
+# into GCC bitcode that rust-lld cannot link (verified: undefined ts_* symbols).
+options=('!debug' '!lto')
+source=("$pkgname::git+file://$(cd "$(dirname "$BASH_SOURCE")/.." && pwd)")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$pkgname"
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd "$pkgname"
+  # --locked: Cargo.lock is the gpui pin (PLAN.md §8) — an unlocked build
+  # floats gpui to whatever Zed pushed today, which is exactly the rebuild
+  # roulette the lockfile exists to prevent.
+  cargo build --release --locked -p omafiles
+}
+
+package() {
+  cd "$pkgname"
+  install -Dm755 target/release/omafiles "$pkgdir/usr/bin/omafiles"
+  # Named after the app_id so Wayland can associate window and entry.
+  install -Dm644 contrib/omafiles.desktop \
+    "$pkgdir/usr/share/applications/dev.omarchy.omafiles.desktop"
+  # Reference copies of the opt-in user configuration.
+  install -Dm755 contrib/hooks/omafiles-theme-reload \
+    "$pkgdir/usr/share/omafiles/hooks/omafiles-theme-reload"
+  install -Dm644 contrib/hypr-bindings.lua \
+    "$pkgdir/usr/share/omafiles/hypr-bindings.lua"
+  install -Dm644 contrib/README.md "$pkgdir/usr/share/omafiles/README.md"
+}

@@ -1,0 +1,23 @@
+#!/bin/bash
+# Nudge running omafiles instances to reload their design tokens.
+#
+# Optional. omafiles watches the filesystem directly and picks up theme, font
+# and shell.toml changes on its own — this is belt-and-braces for the case
+# where inotify watches are exhausted (`fs.inotify.max_user_watches`), which
+# fails silently and is otherwise very hard to diagnose.
+#
+# omafiles already watches ~/.config/omarchy for shell.toml, so touching a file
+# there is enough to trigger a reload. No socket, no pid file, no IPC.
+#
+# Install:
+#   mkdir -p ~/.config/omarchy/hooks/theme-set.d ~/.config/omarchy/hooks/font-set.d
+#   install -m755 contrib/hooks/omafiles-theme-reload \
+#       ~/.config/omarchy/hooks/theme-set.d/omafiles-theme-reload
+#   ln -sf ~/.config/omarchy/hooks/theme-set.d/omafiles-theme-reload \
+#       ~/.config/omarchy/hooks/font-set.d/omafiles-theme-reload
+#
+# omarchy-hook passes the theme or font name as $1; we do not need it.
+
+set -euo pipefail
+
+touch "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/.omafiles-reload"

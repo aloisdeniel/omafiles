@@ -1,0 +1,16 @@
+# Installed as dev.omarchy.omafiles.desktop — the file name must match the
+# Wayland app_id (main.rs's APP_ID) or taskbars and mime associations cannot
+# find the running window.
+[Desktop Entry]
+Type=Application
+Name=omafiles
+GenericName=File Manager
+Comment=Keyboard-first file explorer for Omarchy
+Exec=omafiles %f
+# No bundled icon yet; every icon theme carries this name.
+Icon=system-file-manager
+Terminal=false
+Categories=System;FileTools;FileManager;
+MimeType=inode/directory;
+Keywords=files;explorer;browser;directory;
+StartupNotify=true

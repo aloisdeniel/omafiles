@@ -1,0 +1,33 @@
+[package]
+name = "omafiles"
+description = "A keyboard-first file explorer for Omarchy."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "omafiles"
+path = "src/lib.rs"
+
+[[bin]]
+name = "omafiles"
+path = "src/main.rs"
+
+[dependencies]
+omarchy-tokens.workspace = true
+omarchy-ui.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui-component.workspace = true
+notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+nucleo.workspace = true
+ignore.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true

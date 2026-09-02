@@ -1,0 +1,20 @@
+[package]
+name = "omarchy-ui"
+description = "An Omarchy design system for gpui: live theme tokens and a component kit."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+omarchy-tokens.workspace = true
+gpui.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+gpui-component.workspace = true
+
+[dev-dependencies]
+# Only the gallery example opens a window, so the platform backend is not a
+# dependency of the library itself.
+gpui_platform.workspace = true
