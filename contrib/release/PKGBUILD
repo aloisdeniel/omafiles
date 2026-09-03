@@ -10,7 +10,7 @@
 # Install a downloaded package with:  sudo pacman -U omafiles-*.pkg.tar.zst
 
 pkgname=omafiles
-pkgver=0.0.1
+pkgver=0.0.2
 pkgrel=1
 pkgdesc="Keyboard-first file explorer for Omarchy"
 arch=('x86_64')
