@@ -4,12 +4,17 @@ The Omarchy file explorer. Keyboard-first, themed by Omarchy, one binary.
 
 ## Install
 
-Prebuilt for Omarchy (Arch Linux, x86_64). Grab the package from the
+Prebuilt for Omarchy (Arch Linux, x86_64 and aarch64). Grab the package from the
 [latest release](https://github.com/aloisdeniel/omafiles/releases/latest):
 
 ```sh
+# For x86_64:
 curl -LO https://github.com/aloisdeniel/omafiles/releases/latest/download/omafiles-0.0.1-1-x86_64.pkg.tar.zst
 sudo pacman -U omafiles-0.0.1-1-x86_64.pkg.tar.zst
+
+# For aarch64:
+curl -LO https://github.com/aloisdeniel/omafiles/releases/latest/download/omafiles-0.0.1-1-aarch64.pkg.tar.zst
+sudo pacman -U omafiles-0.0.1-1-aarch64.pkg.tar.zst
 ```
 
 pacman installs the runtime dependencies (`git`, `ffmpeg`, `xdg-utils`),
