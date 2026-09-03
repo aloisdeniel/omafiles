@@ -12,7 +12,7 @@ pkgname=omafiles-git
 pkgver=r21.c7d8c92
 pkgrel=1
 pkgdesc="Keyboard-first file explorer for Omarchy"
-arch=('x86_64')
+arch=('x86_64' 'aarch64')
 url="https://github.com/aloisdeniel/omafiles"
 license=('MIT')
 # git: branch reads and switching (M8). ffmpeg: video posters (M7).

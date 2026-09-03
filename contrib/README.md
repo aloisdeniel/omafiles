@@ -9,7 +9,7 @@ apply, because writing into `$HOME` unasked is how software loses trust.
 Prebuilt, from the [latest release](https://github.com/aloisdeniel/omafiles/releases/latest):
 
 ```sh
-sudo pacman -U omafiles-<version>-1-x86_64.pkg.tar.zst
+sudo pacman -U omafiles-<version>-1-<arch>.pkg.tar.zst
 ```
 
 Or built from source, here:

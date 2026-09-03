@@ -1,10 +1,10 @@
 # Maintainer: Alois Deniel
 #
-# Template for the AUR `omafiles-bin` package. `@VERSION@` and `@SHA256@` are
-# filled in by .github/workflows/release.yml, which then pushes the result to
-# aur.archlinux.org. It repackages the prebuilt tree the release workflow
-# publishes as omafiles-<ver>-x86_64-linux.tar.gz — no Rust toolchain, no
-# fifteen-minute gpui build on the user's machine.
+# Template for the AUR `omafiles-bin` package. `@VERSION@`, `@SHA256_X86_64@`,
+# and `@SHA256_AARCH64@` are filled in by .github/workflows/release.yml, which
+# then pushes the result to aur.archlinux.org. It repackages the prebuilt trees
+# the release workflow publishes as omafiles-<ver>-<arch>-linux.tar.gz — no
+# Rust toolchain, no fifteen-minute gpui build on the user's machine.
 #
 #   yay -S omafiles-bin
 
@@ -12,14 +12,16 @@ pkgname=omafiles-bin
 pkgver=@VERSION@
 pkgrel=1
 pkgdesc="Keyboard-first file explorer for Omarchy (prebuilt binary)"
-arch=('x86_64')
+arch=('x86_64' 'aarch64')
 url="https://github.com/aloisdeniel/omafiles"
 license=('MIT')
 depends=('git' 'ffmpeg' 'xdg-utils' 'glib2' 'wl-clipboard' 'libxkbcommon-x11' 'libxcb')
 provides=('omafiles')
 conflicts=('omafiles')
-source=("$url/releases/download/v$pkgver/omafiles-$pkgver-x86_64-linux.tar.gz")
-sha256sums=('@SHA256@')
+source_x86_64=("$url/releases/download/v$pkgver/omafiles-$pkgver-x86_64-linux.tar.gz")
+source_aarch64=("$url/releases/download/v$pkgver/omafiles-$pkgver-aarch64-linux.tar.gz")
+sha256sums_x86_64=('@SHA256_X86_64@')
+sha256sums_aarch64=('@SHA256_AARCH64@')
 
 package() {
   # The tarball is the installed tree itself: usr/bin, usr/share/...
