@@ -185,6 +185,21 @@ pub fn create_file(path: &Path) -> Result<PathBuf, String> {
     Ok(path.to_path_buf())
 }
 
+/// Create the directory at `path`, parents included, and return it.
+pub fn create_directory(path: &Path) -> Result<PathBuf, String> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| "a directory needs a name".to_string())?
+        .to_string_lossy()
+        .into_owned();
+    if path.exists() {
+        return Err(format!("\u{201c}{name}\u{201d} already exists"));
+    }
+    std::fs::create_dir_all(path)
+        .map_err(|err| format!("could not create the directory: {err}"))?;
+    Ok(path.to_path_buf())
+}
+
 /// Zip `source` into a sibling archive and return its path.
 ///
 /// `zip -r` when installed, else `bsdtar` (libarchive ships with the base
@@ -375,6 +390,17 @@ mod tests {
             // A machine with neither tool skips rather than fails.
             Err(error) => assert!(error.contains("available")),
         }
+    }
+
+    #[test]
+    fn a_directory_is_created_with_its_parents_and_never_twice() {
+        let dir = std::env::temp_dir().join(format!("omafiles-mkdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let made = create_directory(&dir.join("a/b")).unwrap();
+        assert!(made.is_dir());
+        let again = create_directory(&dir.join("a/b")).unwrap_err();
+        assert!(again.contains("already exists"), "{again}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

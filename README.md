@@ -1,4 +1,4 @@
-# omafiles
+# Omafiles
 
 The Omarchy file explorer. Keyboard-first, themed by Omarchy, one binary.
 

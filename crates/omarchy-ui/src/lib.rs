@@ -20,8 +20,8 @@ mod modal;
 mod syntax;
 
 pub use components::{
-    ActionButton, Badge, BadgeTone, Breadcrumb, Button, ButtonKind, KeyHint, Panel, ROW_GROUP,
-    Row, SectionHeader, Separator,
+    ActionButton, Badge, BadgeTone, Breadcrumb, Button, ButtonKind, Hint, KeyHint, Panel,
+    ROW_GROUP, Row, SectionHeader, Separator,
 };
 pub use contrast::{
     MIN_PRIMARY_CONTRAST, MIN_SECONDARY_CONTRAST, best_of, contrast_ratio, ensure_contrast,

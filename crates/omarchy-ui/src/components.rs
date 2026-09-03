@@ -10,9 +10,10 @@
 //! real call site to shape them.
 
 use gpui::{
-    AnyElement, App, ClickEvent, Div, ElementId, InteractiveElement as _, IntoElement,
-    ParentElement, Pixels, Point, Render, RenderOnce, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled, Window, div, px,
+    AnyElement, AnyView, App, AppContext as _, ClickEvent, Context, Div, DragMoveEvent, ElementId,
+    InteractiveElement as _, IntoElement, ParentElement, Pixels, Point, Render, RenderOnce,
+    SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
+    px,
 };
 
 use crate::{ActiveTheme as _, Chrome, InteractiveSurface, SurfaceState};
@@ -107,7 +108,13 @@ pub struct Row {
     /// element — because `on_drag` is generic over the payload and the preview,
     /// and neither can be named in a struct field.
     drag: Option<ElementAdapter>,
-    drop: Option<ElementAdapter>,
+    /// One per payload type: a row can be a target for more than one kind of
+    /// drag — a tab row takes both tabs and entries.
+    drop: Vec<ElementAdapter>,
+    /// How the row draws while something droppable hovers it — see
+    /// [`Row::drag_over`].
+    drag_over: Vec<ElementAdapter>,
+    drag_move: Vec<ElementAdapter>,
     right_click: Option<ElementAdapter>,
     /// Overrides the trailing inset. A row ending in a control that brings
     /// its own hit box (the tab list's close button) would otherwise show the
@@ -127,7 +134,9 @@ impl Row {
             cursor: false,
             on_click: None,
             drag: None,
-            drop: None,
+            drop: Vec::new(),
+            drag_over: Vec::new(),
+            drag_move: Vec::new(),
             right_click: None,
             padding_right: None,
         }
@@ -164,7 +173,34 @@ impl Row {
         mut self,
         handler: impl Fn(&T, &mut Window, &mut App) + 'static,
     ) -> Self {
-        self.drop = Some(Box::new(move |element| element.on_drop(handler)));
+        self.drop
+            .push(Box::new(move |element| element.on_drop(handler)));
+        self
+    }
+
+    /// Follow a dragged `T` while it moves anywhere in the window — gpui
+    /// fires this for every pointer move during the drag, not only over this
+    /// row, so the handler checks `event.bounds` itself. What lets a row
+    /// know whether the pointer is over its top or its bottom half.
+    pub fn on_drag_move<T: 'static>(
+        mut self,
+        handler: impl Fn(&DragMoveEvent<T>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.drag_move
+            .push(Box::new(move |element| element.on_drag_move(handler)));
+        self
+    }
+
+    /// Restyle the row while a dragged `T` is over it — the cue that a drop
+    /// here will land. Pair it with [`Row::on_drop`] for the same `T`: a row
+    /// that lights up and then swallows the drop is worse than one that never
+    /// lit.
+    pub fn drag_over<T: 'static>(
+        mut self,
+        style: impl Fn(StyleRefinement, &T, &mut Window, &mut App) -> StyleRefinement + 'static,
+    ) -> Self {
+        self.drag_over
+            .push(Box::new(move |element| element.drag_over::<T>(style)));
         self
     }
 
@@ -271,7 +307,13 @@ impl RenderOnce for Row {
         if let Some(apply) = self.drag {
             row = apply(row);
         }
-        if let Some(apply) = self.drop {
+        for apply in self.drop {
+            row = apply(row);
+        }
+        for apply in self.drag_over {
+            row = apply(row);
+        }
+        for apply in self.drag_move {
             row = apply(row);
         }
         if let Some(apply) = self.right_click {
@@ -318,8 +360,15 @@ pub struct ActionButton {
     enabled: bool,
     /// Carries the accent — a state badge that is currently "on".
     accent: bool,
+    /// The label is a hint, not a caption: the button is the glyph alone
+    /// and the verb appears in a popover on hover. See [`ActionButton::compact`].
+    compact: bool,
     on_click: Option<ClickHandler>,
 }
+
+/// The hover group an action button forms, so its glyph can follow the
+/// button's hover without the glyph being the hovered element.
+const ACTION_GROUP: &str = "action";
 
 impl ActionButton {
     pub fn new(id: impl Into<ElementId>) -> Self {
@@ -330,8 +379,18 @@ impl ActionButton {
             children: Vec::new(),
             enabled: true,
             accent: false,
+            compact: false,
             on_click: None,
         }
+    }
+
+    /// Hide the label and offer it as a hover hint instead. The default for
+    /// the chrome's verb bars: a row of glyphs reads as chrome, a row of
+    /// words as a form. The label must still be set — it is what the hint
+    /// says.
+    pub fn compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
+        self
     }
 
     pub fn glyph(mut self, glyph: impl Into<SharedString>) -> Self {
@@ -382,7 +441,12 @@ impl RenderOnce for ActionButton {
         // the content around them. Derived from the scale so it tracks the
         // user's text size.
         let size = space.control_height() - space.md();
-        let square = self.label.is_none() && self.children.is_empty();
+        let (label, hint) = if self.compact {
+            (None, self.label)
+        } else {
+            (self.label, None)
+        };
+        let square = label.is_none() && self.children.is_empty();
 
         // Two roles inside one button: the glyph is always the *secondary*
         // colour — it decorates the verb rather than being it — and the label
@@ -429,28 +493,70 @@ impl RenderOnce for ActionButton {
             // overflow the detail panel.
             button.px(px(space.md()))
         };
+        let enabled = self.enabled;
+        let (foreground, bright) = (theme.foreground(), theme.bright_foreground());
         let mut button = button
+            .group(ACTION_GROUP)
             .children(self.glyph.map(|glyph| {
-                div()
-                    .text_color(glyph_color)
-                    .child(glyph)
-                    .into_any_element()
+                let mut glyph = div().text_color(glyph_color).child(glyph);
+                // Highlighted, the glyph steps up to the primary colour with
+                // the border: the whole button lights, not just its fill.
+                if enabled {
+                    glyph = glyph.group_hover(ACTION_GROUP, move |s| s.text_color(foreground));
+                }
+                glyph.into_any_element()
             }))
-            .children(self.label.map(|label| label.into_any_element()))
+            .children(label.map(|label| label.into_any_element()))
             .children(self.children);
 
-        if self.enabled {
+        if enabled {
             let (hover, pressed) = (theme.hover_fill(), theme.pressed_fill());
-            // The fill carries the hover; the colours stay in their roles.
+            // The fill carries the hover, and the border and glyph step up to
+            // the primary colour with it; the label's role does not change.
             button = button
                 .cursor_pointer()
-                .hover(move |s| s.bg(hover))
+                .hover(move |s| s.bg(hover).border_color(foreground).text_color(bright))
                 .active(move |s| s.bg(pressed));
             if let Some(handler) = self.on_click {
                 button = button.on_click(handler);
             }
         }
+        if let Some(hint) = hint {
+            button = button.tooltip(move |_window, cx| Hint::view(hint.clone(), cx));
+        }
         button
+    }
+}
+
+/// A one-line hover hint — what a compact [`ActionButton`] says its verb
+/// is. A small card in the menu surface's colours, caption-sized, because
+/// it annotates the chrome rather than joining it.
+pub struct Hint {
+    text: SharedString,
+}
+
+impl Hint {
+    pub fn view(text: impl Into<SharedString>, cx: &mut App) -> AnyView {
+        let text = text.into();
+        cx.new(|_| Hint { text }).into()
+    }
+}
+
+impl Render for Hint {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let space = theme.space();
+        div()
+            .px(px(space.md()))
+            .py(px(space.xs()))
+            .rounded(px(theme.radius().min(4.0)))
+            .bg(theme.surface())
+            .border(px(theme.border_width().max(1.0)))
+            .border_color(theme.border())
+            .text_size(px(theme.type_scale().caption()))
+            .text_color(theme.foreground())
+            .whitespace_nowrap()
+            .child(self.text.clone())
     }
 }
 

@@ -254,27 +254,46 @@ impl Session {
         true
     }
 
-    /// Move a tab between workspaces. This is what drag-and-drop and
-    /// `Ctrl-Shift-N` both call.
+    /// Move a tab to the end of another workspace. This is what a drop on
+    /// a workspace header and `Ctrl-Shift-M` both call.
     pub fn move_tab(&mut self, from: usize, tab: usize, to: usize) -> bool {
-        if from >= self.workspaces.len() || to >= self.workspaces.len() || from == to {
+        if from == to {
+            return false;
+        }
+        let Some(end) = self.workspaces.get(to).map(|w| w.tabs.len()) else {
+            return false;
+        };
+        self.move_tab_to(from, tab, to, end)
+    }
+
+    /// Move a tab to position `at` in workspace `to` — the same workspace
+    /// included, which is how a drop between two tab rows reorders them.
+    /// `at` is an insertion index over the list *before* the move, so
+    /// dropping a tab just below itself is a no-op rather than a hop.
+    pub fn move_tab_to(&mut self, from: usize, tab: usize, to: usize, at: usize) -> bool {
+        if from >= self.workspaces.len() || to >= self.workspaces.len() {
             return false;
         }
         if tab >= self.workspaces[from].tabs.len() {
             return false;
         }
+        let mut at = at.min(self.workspaces[to].tabs.len());
+        if from == to {
+            if at == tab || at == tab + 1 {
+                return false;
+            }
+            if at > tab {
+                at -= 1;
+            }
+        }
         let moved = self.workspaces[from].tabs.remove(tab);
         self.workspaces[from].clamp();
-        self.workspaces[to].tabs.push(moved);
-        self.workspaces[to].active_tab = self.workspaces[to].tabs.len() - 1;
+        self.workspaces[to].tabs.insert(at, moved);
+        self.workspaces[to].active_tab = at;
 
         // Follow the tab: moving the one you are looking at and being left
         // staring at a different directory would be disorienting.
         self.active = to;
-
-        if self.workspaces[from].tabs.is_empty() && from == GLOBAL {
-            // Global may legitimately empty out; that is fine.
-        }
         true
     }
 
@@ -579,6 +598,50 @@ mod tests {
         assert!(!s.delete_workspace(GLOBAL));
         assert!(!s.rename_workspace(GLOBAL, "Nope".into()));
         assert!(s.workspaces()[GLOBAL].is_global());
+    }
+
+    #[test]
+    fn a_tab_can_be_reordered_within_its_workspace() {
+        let t = Tree::new("reorder");
+        let mut s = Session::new(t.dir("a"));
+        s.new_tab(t.dir("b"));
+        s.new_tab(t.dir("c"));
+        let names = |s: &Session| -> Vec<String> {
+            s.workspaces()[GLOBAL].tabs.iter().map(Tab::label).collect()
+        };
+        assert_eq!(names(&s), ["a", "b", "c"]);
+
+        // Dropping a tab on either edge of itself is where it already is.
+        assert!(!s.move_tab_to(GLOBAL, 0, GLOBAL, 0));
+        assert!(!s.move_tab_to(GLOBAL, 0, GLOBAL, 1));
+        assert_eq!(names(&s), ["a", "b", "c"]);
+
+        assert!(s.move_tab_to(GLOBAL, 0, GLOBAL, 3));
+        assert_eq!(names(&s), ["b", "c", "a"]);
+        assert_eq!(
+            s.workspaces()[GLOBAL].active_tab,
+            2,
+            "the moved tab stays active"
+        );
+
+        assert!(s.move_tab_to(GLOBAL, 2, GLOBAL, 0));
+        assert_eq!(names(&s), ["a", "b", "c"]);
+        assert_eq!(s.workspaces()[GLOBAL].active_tab, 0);
+    }
+
+    #[test]
+    fn a_tab_can_be_dropped_between_two_in_another_workspace() {
+        let t = Tree::new("reorder-across");
+        let mut s = Session::new(t.dir("a"));
+        let ws = s.add_workspace("Work".into());
+        s.active = ws;
+        s.new_tab(t.dir("x"));
+        s.new_tab(t.dir("y"));
+        assert!(s.move_tab_to(GLOBAL, 0, ws, 1));
+        let names: Vec<String> = s.workspaces()[ws].tabs.iter().map(Tab::label).collect();
+        assert_eq!(names, ["x", "a", "y"]);
+        assert_eq!(s.active_workspace(), ws);
+        assert_eq!(s.workspaces()[ws].active_tab, 1);
     }
 
     #[test]

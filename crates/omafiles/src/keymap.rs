@@ -155,12 +155,25 @@ pub const DEFAULTS: &[(&str, &str, Context)] = &[
     // shift-f10, because the dedicated menu key never reaches gpui's
     // Wayland backend.
     ("entry_menu",        "shift-f10",      Context::Listing),
+    // Selection: the sweep, the flip, the lot. What a drag then carries.
+    ("extend_down",       "shift-down",     Context::Listing),
+    ("extend_down",       "shift-j",        Context::Listing),
+    ("extend_up",         "shift-up",       Context::Listing),
+    ("extend_up",         "shift-k",        Context::Listing),
+    ("toggle_select",     "insert",         Context::Listing),
+    ("select_all",        "ctrl-a",         Context::Listing),
 ];
+
+/// Actions that ship with no key: reachable from the palette, bindable from
+/// `keymap.toml`. Settings toggles live here — a key for something flipped
+/// once a year would only be a key to hit by accident.
+pub const UNBOUND: &[&str] = &["toggle_button_labels"];
 
 /// Every bindable action name — [`DEFAULTS`] plus any action that ships
 /// unbound. Membership here is what makes a `keymap.toml` name valid.
 pub fn known_actions() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = DEFAULTS.iter().map(|(name, ..)| *name).collect();
+    names.extend_from_slice(UNBOUND);
     names.sort_unstable();
     names.dedup();
     names

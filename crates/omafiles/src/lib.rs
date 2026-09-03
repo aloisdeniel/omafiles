@@ -11,6 +11,7 @@
 //! open no display.
 
 pub mod actions;
+pub mod config;
 pub mod entry;
 pub mod fileops;
 pub mod git;

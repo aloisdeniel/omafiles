@@ -16,7 +16,7 @@
 //! We do *not* take gpui-component's table or list: `Row` already exists, and
 //! their table cannot do modifier-aware multi-select without a fork.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
@@ -24,18 +24,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, HighlightStyle,
-    InteractiveElement as _, IntoElement, KeyBinding, ParentElement, Pixels, Point, Render,
-    ScrollStrategy, StatefulInteractiveElement as _, Styled, StyledText, Subscription, Task,
-    TitlebarOptions, UniformListScrollHandle, Window, WindowBackgroundAppearance,
-    WindowDecorations, WindowOptions, actions, div, img, px, uniform_list,
-    ImageFormat, ObjectFit, StyledImage as _,
+    AnyElement, App, AppContext as _, Bounds, Context, DragMoveEvent, Entity, FocusHandle,
+    Focusable, HighlightStyle, ImageFormat, InteractiveElement as _, IntoElement, KeyBinding,
+    ObjectFit, ParentElement, Pixels, Point, Render, ScrollStrategy,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, StyledImage as _, StyledText,
+    Subscription, Task, TitlebarOptions, UniformListScrollHandle, Window,
+    WindowBackgroundAppearance, WindowDecorations, WindowOptions, actions, div, img, px,
+    uniform_list,
 };
 use gpui_component::highlighter::SyntaxHighlighter;
 use gpui_component::input::{Input, InputEvent, InputState, Rope};
 use gpui_component::scroll::Scrollbar;
 use gpui_component::text::TextView;
 use omafiles::actions;
+use omafiles::config;
 use omafiles::entry::{Entry, Kind, format_age, format_size, natural_cmp, nearest_existing};
 use omafiles::fileops;
 use omafiles::git;
@@ -131,6 +133,13 @@ actions!(
         CutEntry,
         DeleteEntry,
         CopyPath,
+        // Selection, for drag and drop
+        ExtendDown,
+        ExtendUp,
+        SelectAll,
+        ToggleSelect,
+        // Settings toggles
+        ToggleButtonLabels,
     ]
 );
 
@@ -168,6 +177,8 @@ fn main() {
 
         let keymap = keymap::Keymap::load(&config_dir().join("omafiles/keymap.toml"));
         bind_keys(cx, &keymap);
+        let config_path = config_dir().join("omafiles/config.toml");
+        let config = config::Config::load(&config_path);
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
 
         let start = start_directory();
@@ -183,7 +194,7 @@ fn main() {
         };
 
         cx.open_window(options, |window, cx| {
-            cx.new(|cx| Explorer::new(start, keymap, window, cx))
+            cx.new(|cx| Explorer::new(start, keymap, config, config_path, window, cx))
         })
         .expect("failed to open window");
         cx.activate(true);
@@ -405,6 +416,20 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Select",
+        &[
+            (
+                "\u{21e7}\u{2193} / \u{21e7}\u{2191}",
+                "extend the selection",
+            ),
+            ("insert", "toggle the entry, step down"),
+            ("^a", "select everything"),
+            ("esc", "clear the selection"),
+            ("^click / \u{21e7}click", "toggle / extend, with the mouse"),
+            ("", "drag onto a directory, a tab or a place to move"),
+        ],
+    ),
+    (
         "Navigate",
         &[
             ("\u{23ce} / l", "open"),
@@ -434,7 +459,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("\u{2326}", "move to the trash"),
             ("z", "compress to zip"),
             ("m", "move to another directory"),
-            ("n", "new file here"),
+            ("n", "new file here \u{2014} a trailing / makes a directory"),
             ("\u{21e7}F10", "entry menu"),
             ("^s", "http server menu"),
             ("^\u{21e7}s", "all http servers"),
@@ -575,6 +600,11 @@ fn typed_binding(keys: &str, action: &str, context: Option<&str>) -> Option<KeyB
         "cut_entry" => KeyBinding::new(keys, CutEntry, context),
         "copy_path" => KeyBinding::new(keys, CopyPath, context),
         "delete_entry" => KeyBinding::new(keys, DeleteEntry, context),
+        "extend_down" => KeyBinding::new(keys, ExtendDown, context),
+        "extend_up" => KeyBinding::new(keys, ExtendUp, context),
+        "select_all" => KeyBinding::new(keys, SelectAll, context),
+        "toggle_select" => KeyBinding::new(keys, ToggleSelect, context),
+        "toggle_button_labels" => KeyBinding::new(keys, ToggleButtonLabels, context),
         _ => return None,
     })
 }
@@ -693,7 +723,7 @@ const COMMANDS: &[Command] = &[
         build: || Box::new(MoveEntry),
     },
     Command {
-        label: "New file",
+        label: "New file or directory",
         action: "create_file",
         build: || Box::new(CreateFile),
     },
@@ -773,6 +803,16 @@ const COMMANDS: &[Command] = &[
         build: || Box::new(ToggleRightPanel),
     },
     Command {
+        label: "Select all",
+        action: "select_all",
+        build: || Box::new(SelectAll),
+    },
+    Command {
+        label: "Toggle button labels",
+        action: "toggle_button_labels",
+        build: || Box::new(ToggleButtonLabels),
+    },
+    Command {
         label: "Keyboard shortcuts",
         action: "show_help",
         build: || Box::new(ShowHelp),
@@ -792,9 +832,9 @@ enum PathPurpose {
     GoTo,
     /// `m`: the entry moves into the directory picked.
     MoveInto { source: PathBuf, name: String },
-    /// `n`: an empty file is created at the typed path. Directory rows
-    /// complete the field rather than confirm, because a directory is never
-    /// the answer here.
+    /// `n`: an empty file is created at the typed path — or a directory,
+    /// when the path ends in `/`. Directory rows complete the field rather
+    /// than confirm, because an existing directory is never the answer here.
     CreateFile,
 }
 
@@ -910,6 +950,15 @@ enum Overlay {
         /// Per variant, the bytes once made — or why they could not be.
         encoded: Vec<Option<Result<Vec<u8>, String>>>,
         cursor: usize,
+    },
+    /// A drop that cannot happen, or a move that did not: what was refused
+    /// and why, one line each. A modal rather than a status-bar notice
+    /// because a drag that ends in nothing reads as a bug, and because
+    /// several items can fail for several reasons at once.
+    Refused {
+        title: &'static str,
+        subtitle: String,
+        reasons: Vec<String>,
     },
     /// `\u{2326}`: the one destructive verb, and it asks first.
     Delete {
@@ -1173,6 +1222,7 @@ fn pin_button(
     id: &'static str,
     path: PathBuf,
     state: PinState,
+    compact: bool,
     cx: &mut Context<Explorer>,
 ) -> ActionButton {
     ActionButton::new(id)
@@ -1182,6 +1232,7 @@ fn pin_button(
         } else {
             "Pin"
         })
+        .compact(compact)
         .enabled(state != PinState::System)
         .on_click(cx.listener(move |this, _e, _w, cx| this.toggle_pin(&path, cx)))
 }
@@ -1203,6 +1254,11 @@ struct Explorer {
     /// form — indices shift when a directory changes, names do not — and this
     /// is the fast one for rendering and movement.
     cursors: HashMap<String, usize>,
+    /// The marked entries per tab id, by **name** — what a drag carries and
+    /// what `\u{21e7}\u{2193}` extends. Names for the same reason
+    /// `Tab::cursor_name` is one: a reload keeps the marks on the same
+    /// files. Never persisted — a selection is a gesture, not a place.
+    selected: HashMap<String, HashSet<String>>,
     /// The revision we last wrote, so the watcher can ignore our own writes.
     written_revision: u64,
     show_hidden: bool,
@@ -1286,6 +1342,14 @@ struct Explorer {
     _action_task: Option<Task<()>>,
     /// The effective keymap, for the palette's key hints (M11).
     keymap: keymap::Keymap,
+    /// The settings that are not keys (`config.toml`), and where to write
+    /// them back when a toggle flips one.
+    config: config::Config,
+    config_path: PathBuf,
+    /// Where a dragged tab would land, while one is over a tab row: the
+    /// insertion line the sidebar draws. Cleared by the drop, by the pointer
+    /// leaving the rows, and by the drag ending anywhere else.
+    tab_drop: Option<TabDrop>,
     /// Bumped per content-search keystroke, so a slow `rg` cannot land its
     /// results over a newer query's.
     grep_generation: u64,
@@ -1307,6 +1371,8 @@ impl Explorer {
     fn new(
         start: PathBuf,
         keymap: keymap::Keymap,
+        config: config::Config,
+        config_path: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -1344,6 +1410,7 @@ impl Explorer {
             session,
             listings,
             cursors,
+            selected: HashMap::new(),
             written_revision: 0,
             show_hidden: false,
             focus: cx.focus_handle(),
@@ -1393,6 +1460,9 @@ impl Explorer {
             _notice_task: None,
             _action_task: None,
             keymap,
+            config,
+            config_path,
+            tab_drop: None,
             grep_generation: 0,
             _grep_task: None,
             _recent_task: None,
@@ -1538,6 +1608,141 @@ impl Explorer {
         }
     }
 
+    // -------------------------------------------------------------- selection
+
+    fn selected_names(&self) -> Option<&HashSet<String>> {
+        self.selected.get(&self.tab_id())
+    }
+
+    fn is_selected(&self, name: &str) -> bool {
+        self.selected_names()
+            .is_some_and(|names| names.contains(name))
+    }
+
+    /// How many entries are marked in the active tab.
+    fn selected_count(&self) -> usize {
+        self.selected_names().map_or(0, HashSet::len)
+    }
+
+    /// The marked entries of the active tab, as listing indices in listing
+    /// order, hidden ones left out: what a drag carries.
+    fn selection(&self) -> Vec<usize> {
+        let (Some(listing), Some(names)) = (self.listing(), self.selected_names()) else {
+            return Vec::new();
+        };
+        listing
+            .visible(self.show_hidden)
+            .into_iter()
+            .filter(|&index| listing.get(index).is_some_and(|e| names.contains(&e.name)))
+            .collect()
+    }
+
+    fn clear_selection(&mut self) {
+        self.selected.remove(&self.tab_id());
+    }
+
+    fn mark(&mut self, index: usize, on: bool) {
+        let Some(name) = self
+            .listing()
+            .and_then(|l| l.get(index))
+            .map(|e| e.name.clone())
+        else {
+            return;
+        };
+        let id = self.tab_id();
+        let names = self.selected.entry(id.clone()).or_default();
+        if on {
+            names.insert(name);
+        } else {
+            names.remove(&name);
+        }
+        if names.is_empty() {
+            self.selected.remove(&id);
+        }
+    }
+
+    fn toggle_mark(&mut self, index: usize) {
+        let on = !self
+            .listing()
+            .and_then(|l| l.get(index))
+            .is_some_and(|e| self.is_selected(&e.name));
+        self.mark(index, on);
+    }
+
+    /// Mark every visible entry between two indices, both included.
+    fn mark_range(&mut self, from: usize, to: usize) {
+        let Some(visible) = self.listing().map(|l| l.visible(self.show_hidden)) else {
+            return;
+        };
+        let position = |index| visible.iter().position(|&i| i == index);
+        let (Some(a), Some(b)) = (position(from), position(to)) else {
+            return;
+        };
+        for &index in &visible[a.min(b)..=a.max(b)] {
+            self.mark(index, true);
+        }
+    }
+
+    /// `\u{21e7}\u{2193}` / `\u{21e7}\u{2191}`: mark the cursor row and the one
+    /// it steps to, so holding the key sweeps a run.
+    fn extend_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.overlay.is_some() || self.pane != Pane::Listing {
+            return;
+        }
+        let Some(cursor) = self.cursor() else {
+            return;
+        };
+        self.mark(cursor, true);
+        self.move_cursor(delta, cx);
+        if let Some(cursor) = self.cursor() {
+            self.mark(cursor, true);
+        }
+        cx.notify();
+    }
+
+    /// Insert: flip the cursor entry and step down — the file-manager
+    /// convention, so tapping it down a list picks out every other file.
+    fn toggle_select(&mut self, cx: &mut Context<Self>) {
+        if self.overlay.is_some() || self.pane != Pane::Listing {
+            return;
+        }
+        let Some(cursor) = self.cursor() else {
+            return;
+        };
+        self.toggle_mark(cursor);
+        self.move_cursor(1, cx);
+        cx.notify();
+    }
+
+    /// `^a`: every visible entry.
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        if self.overlay.is_some() || self.pane != Pane::Listing {
+            return;
+        }
+        let Some(visible) = self.listing().map(|l| l.visible(self.show_hidden)) else {
+            return;
+        };
+        for index in visible {
+            self.mark(index, true);
+        }
+        cx.notify();
+    }
+
+    /// Forget marks on entries a tab's listing no longer has — a file that
+    /// was moved or deleted must not stay marked in memory and come back
+    /// should a file of the same name appear.
+    fn prune_selection_of(&mut self, id: &str) {
+        let Some(listing) = self.listings.get(id) else {
+            return;
+        };
+        if let Some(names) = self.selected.get_mut(id) {
+            names.retain(|name| listing.index_of_name(name).is_some());
+            if names.is_empty() {
+                self.selected.remove(id);
+            }
+        }
+    }
+
     // ------------------------------------------------------------- navigation
 
     /// The name under the cursor, for history's cursor memory.
@@ -1575,7 +1780,19 @@ impl Explorer {
                     .filter(|i| listing.visible(this.show_hidden).contains(i))
                     .or_else(|| first_visible(&listing, this.show_hidden));
 
+                // Marks belong to a directory: they go with it, and a
+                // re-read of the same one only sheds the marks on files
+                // that have since gone.
+                let same_dir = this
+                    .listings
+                    .get(&id)
+                    .is_some_and(|old| old.path == listing.path);
                 this.listings.insert(id.clone(), listing);
+                if same_dir {
+                    this.prune_selection_of(&id);
+                } else {
+                    this.selected.remove(&id);
+                }
                 if this.tab_id() == id {
                     this.set_cursor(restored);
                     this.scroll_to_cursor();
@@ -3531,6 +3748,10 @@ impl Explorer {
             self.confirm_delete(window, cx);
             return;
         }
+        if matches!(self.overlay, Some(Overlay::Refused { .. })) {
+            self.dismiss_overlay(window, cx);
+            return;
+        }
         // Enter in the server menu starts the loopback server — the common
         // case, keyboard-reachable. Stopping stays a deliberate click, and a
         // running server's Enter does nothing rather than toggling.
@@ -3653,15 +3874,33 @@ impl Explorer {
         self.open_path_picker(purpose, here, window, cx);
     }
 
-    /// `n`, or the status bar's New file: create an empty file. The field
-    /// opens on the current directory with the slash already typed, so what
-    /// is left to type is the name — but the whole path is editable.
+    /// `n`, or the status bar's New: create an empty file, or a directory
+    /// if the typed path ends in `/`. The field opens on the current
+    /// directory with the slash already typed, so what is left to type is
+    /// the name — but the whole path is editable.
     fn create_file_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut here = self.current_path().to_string_lossy().into_owned();
         if !here.ends_with('/') {
             here.push('/');
         }
         self.open_path_picker(PathPurpose::CreateFile, here, window, cx);
+    }
+
+    /// The palette's "Toggle button labels": flip the setting and keep it.
+    fn toggle_button_labels(&mut self, cx: &mut Context<Self>) {
+        self.config.button_labels = !self.config.button_labels;
+        match self.config.save(&self.config_path) {
+            Ok(()) => {
+                let said = if self.config.button_labels {
+                    "button labels shown"
+                } else {
+                    "button labels hidden \u{2014} hover a button for its verb"
+                };
+                self.inform_user(said.to_string(), cx);
+            }
+            Err(err) => self.notify_user(format!("could not save the setting: {err}"), cx),
+        }
+        cx.notify();
     }
 
     /// The shared location picker, opened for one of its purposes.
@@ -3794,19 +4033,29 @@ impl Explorer {
         let typed = self.input.read(cx).value().to_string();
         let typed_path = PathBuf::from(expand_tilde(&typed));
 
-        // The file picker: the typed text names the file. A highlighted
-        // directory completes the field instead of confirming.
+        // The maker: the typed text names the file, or the directory when
+        // it ends in `/`. A highlighted directory completes the field
+        // instead of confirming.
         if matches!(purpose, PathPurpose::CreateFile) {
             if let Some(dir) = cursor.and_then(|i| suggestions.get(i).cloned()) {
                 self.complete_path_field(dir, window, cx);
                 return;
             }
-            if typed.trim().is_empty() || typed.ends_with('/') || typed_path.is_dir() {
-                self.notify_user("type a name for the file".to_string(), cx);
+            let trimmed = typed.trim();
+            let directory = trimmed.ends_with('/');
+            // `a/b/` names `b`, not an empty last component.
+            let target = PathBuf::from(expand_tilde(trimmed.trim_end_matches('/')));
+            if target.file_name().is_none() || (!directory && target.is_dir()) {
+                let what = if directory { "directory" } else { "file" };
+                self.notify_user(format!("type a name for the {what}"), cx);
                 return;
             }
             self.dismiss_overlay(window, cx);
-            self.create_file_at(typed_path, cx);
+            if directory {
+                self.create_directory_at(target, cx);
+            } else {
+                self.create_file_at(target, cx);
+            }
             return;
         }
 
@@ -3893,13 +4142,104 @@ impl Explorer {
         }));
     }
 
+    /// A drop landed on `dest` — a directory row, a tab, a place.
+    ///
+    /// Every item is checked first, and one that cannot go refuses the whole
+    /// drop with a modal saying why: half a selection moving is harder to
+    /// undo than none of it. What passes moves in the background.
+    fn drop_entries(&mut self, dragged: &DraggedEntries, dest: PathBuf, cx: &mut Context<Self>) {
+        let items = dragged.items.clone();
+        let where_to = display_path(&dest);
+        let reasons = drop_refusals(&items, &dest);
+        if !reasons.is_empty() {
+            self.overlay = Some(Overlay::Refused {
+                title: "Cannot move here",
+                subtitle: format!("nothing was moved into {where_to}"),
+                reasons,
+            });
+            cx.notify();
+            return;
+        }
+        // The marks travel with the files; what is left behind is unmarked.
+        self.clear_selection();
+        self.move_many(items, dest, cx);
+    }
+
+    /// Move `items` into `dest`, off the main thread, and say how it went:
+    /// a notice when everything moved, the refusal modal with one line per
+    /// failure when anything did not.
+    fn move_many(&mut self, items: Arc<Vec<DragItem>>, dest: PathBuf, cx: &mut Context<Self>) {
+        self._action_task = Some(cx.spawn(async move |this, cx| {
+            let (dest_for_op, items_for_op) = (dest.clone(), items.clone());
+            let failures: Vec<String> = cx
+                .background_spawn(async move {
+                    items_for_op
+                        .iter()
+                        .filter_map(|item| {
+                            fileops::move_into(&item.path, &dest_for_op)
+                                .err()
+                                .map(|err| format!("\u{201c}{}\u{201d}: {err}", item.name))
+                        })
+                        .collect()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let where_to = display_path(&dest);
+                // The active tab's watcher reloads the directory the files
+                // left. Any other tab may be looking at where they landed,
+                // and its cached listing is now wrong — it re-reads when
+                // next shown.
+                this.forget_other_listings();
+                if failures.is_empty() {
+                    let what = DraggedEntries { items }.label();
+                    this.inform_user(format!("moved {what} into {where_to}"), cx);
+                } else {
+                    let moved = items.len() - failures.len();
+                    this.overlay = Some(Overlay::Refused {
+                        title: "Could not move",
+                        subtitle: if moved > 0 {
+                            format!("{moved} of {} moved into {where_to}", items.len())
+                        } else {
+                            format!("nothing was moved into {where_to}")
+                        },
+                        reasons: failures,
+                    });
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    /// Drop every cached listing but the active tab's, so tabs whose
+    /// directory changed under them re-read it when next shown.
+    fn forget_other_listings(&mut self) {
+        let keep = self.tab_id();
+        self.listings.retain(|id, _| *id == keep);
+        self.cursors.retain(|id, _| *id == keep);
+    }
+
     /// Create the file, then take the tab to its directory with the cursor on
     /// it — a new file you cannot see is a new file you will look for.
     fn create_file_at(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.land_created(path, fileops::create_file, cx);
+    }
+
+    /// The directory twin of [`Self::create_file_at`]: same landing, with
+    /// the cursor on the new directory rather than inside it.
+    fn create_directory_at(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.land_created(path, fileops::create_directory, cx);
+    }
+
+    /// Run `make` in the background, then go to the parent of what it made
+    /// with the cursor on it.
+    fn land_created(
+        &mut self,
+        path: PathBuf,
+        make: fn(&Path) -> Result<PathBuf, String>,
+        cx: &mut Context<Self>,
+    ) {
         self._action_task = Some(cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_spawn(async move { fileops::create_file(&path) })
-                .await;
+            let outcome = cx.background_spawn(async move { make(&path) }).await;
             let _ = this.update(cx, |this, cx| match outcome {
                 Ok(created) => {
                     let name = created
@@ -3979,7 +4319,8 @@ impl Explorer {
                             let keep = this.cursor_name();
                             let id = this.tab_id();
                             let listing = Listing::read(&this.current_path());
-                            this.listings.insert(id, listing);
+                            this.listings.insert(id.clone(), listing);
+                            this.prune_selection_of(&id);
                             let restored = this.restore_cursor(keep.as_deref()).or_else(|| {
                                 this.listing()
                                     .and_then(|l| first_visible(l, this.show_hidden))
@@ -4013,6 +4354,11 @@ impl Focusable for Explorer {
 
 impl Render for Explorer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A tab drag that ended anywhere but on a tab row leaves its
+        // insertion line behind; the frame after the drag removes it.
+        if self.tab_drop.is_some() && !cx.has_active_drag() {
+            self.tab_drop = None;
+        }
         // One call site, at the top of the frame, rather than in each of the
         // dozen places the cursor can move. It is a key comparison when nothing
         // changed, and it cannot be forgotten the way a dozen calls can.
@@ -4192,8 +4538,10 @@ impl Render for Explorer {
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
                 // Ordered: an open overlay is on top of the expanded
                 // preview, so it must be the one Escape closes first.
-                if this.overlay.is_none() {
-                    this.collapse_preview(cx);
+                if this.overlay.is_none() && !this.collapse_preview(cx) {
+                    // Nothing else to close: Escape clears the marks.
+                    this.clear_selection();
+                    cx.notify();
                 }
                 this.dismiss_overlay(window, cx);
             }))
@@ -4242,6 +4590,10 @@ impl Render for Explorer {
                     this.copy_path_selected(cx)
                 }
             }))
+            .on_action(cx.listener(|this, _: &ExtendDown, _, cx| this.extend_selection(1, cx)))
+            .on_action(cx.listener(|this, _: &ExtendUp, _, cx| this.extend_selection(-1, cx)))
+            .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSelect, _, cx| this.toggle_select(cx)))
             .on_action(cx.listener(|this, _: &DeleteEntry, window, cx| {
                 if !this.overlay_owns_input() {
                     this.delete_selected(window, cx)
@@ -4267,6 +4619,9 @@ impl Render for Explorer {
                     this.move_selected(window, cx)
                 }
             }))
+            .on_action(
+                cx.listener(|this, _: &ToggleButtonLabels, _, cx| this.toggle_button_labels(cx)),
+            )
             .on_action(cx.listener(|this, _: &CreateFile, window, cx| {
                 if !this.overlay_owns_input() {
                     this.create_file_here(window, cx)
@@ -4669,15 +5024,21 @@ impl Explorer {
             if index == system_count {
                 column = column.child(SectionHeader::new("pinned"));
             }
-            let row = place_row(index, &place, cursor == index && focused, focused, cx).on_click(
-                cx.listener(move |this, _event, window, cx| {
+            let dest = place.path.clone();
+            let row = place_row(index, &place, cursor == index && focused, focused, cx)
+                .on_click(cx.listener(move |this, _event, window, cx| {
                     // A place is a shortcut, so one click goes there. Focus lands
                     // in the listing, because browsing is what you do next.
                     this.place_cursor = index;
                     this.open_place(cx);
                     this.focus_pane(Pane::Listing, window, cx);
-                }),
-            );
+                }))
+                // And somewhere to drop: entries dragged onto a place move
+                // into its directory.
+                .drag_over::<DraggedEntries>(drop_highlight)
+                .on_drop(cx.listener(move |this, dragged: &DraggedEntries, _w, cx| {
+                    this.drop_entries(dragged, dest.clone(), cx);
+                }));
             column = column.child(row);
         }
 
@@ -4704,7 +5065,7 @@ impl Explorer {
                             div()
                                 .flex_1()
                                 .min_w(px(0.))
-                                .overflow_hidden()
+                                .truncate()
                                 .child(location.name.clone()),
                         )
                         .on_click(cx.listener(move |this, _e, window, cx| {
@@ -4736,6 +5097,21 @@ impl Explorer {
             if workspace.collapsed {
                 return Vec::new();
             }
+            let count = workspace.tabs.len();
+            let accent = cx.theme().accent();
+            // The insertion line, when a dragged tab is over this group.
+            let drop_at = this
+                .tab_drop
+                .filter(|drop| drop.workspace == w)
+                .map(|drop| drop.index);
+            let line = move |top: bool| {
+                let line = div().absolute().left_0().right_0().h(px(2.)).bg(accent);
+                if top {
+                    line.top(px(-1.))
+                } else {
+                    line.bottom(px(-1.))
+                }
+            };
             workspace
                 .tabs
                 .iter()
@@ -4746,70 +5122,80 @@ impl Explorer {
                             this.close_tab_at(w, t, cx);
                         })
                     });
-                    tab_row(w, t, tab, w == active_ws && t == active_tab, on_close, cx)
+                    let dest = tab.path().to_path_buf();
+                    let row = tab_row(w, t, tab, w == active_ws && t == active_tab, on_close, cx)
                         .on_click(cx.listener(move |this, _event, window, cx| {
                             this.activate_tab(w, t, cx);
                             this.focus_pane(Pane::Listing, window, cx);
                         }))
+                        // Entries dropped on a tab move into the directory it
+                        // shows; the tab itself stays where it is.
+                        .drag_over::<DraggedEntries>(drop_highlight)
+                        .on_drop(cx.listener(move |this, dragged: &DraggedEntries, _w, cx| {
+                            this.drop_entries(dragged, dest.clone(), cx);
+                        }))
+                        // A tab dragged over this row lands before it from the
+                        // top half, after it from the bottom half. gpui fires
+                        // drag-move for every pointer move, so the row checks
+                        // its own bounds.
+                        .on_drag_move::<DraggedTab>(cx.listener(
+                            move |this, event: &DragMoveEvent<DraggedTab>, _w, cx| {
+                                let position = event.event.position;
+                                if !event.bounds.contains(&position) {
+                                    return;
+                                }
+                                let before = position.y < event.bounds.center().y;
+                                let index = if before { t } else { t + 1 };
+                                let same = this
+                                    .tab_drop
+                                    .is_some_and(|d| d.workspace == w && d.index == index);
+                                if !same {
+                                    this.tab_drop = Some(TabDrop {
+                                        workspace: w,
+                                        index,
+                                        bounds: event.bounds,
+                                    });
+                                    cx.notify();
+                                }
+                            },
+                        ))
+                        .on_drop(cx.listener(move |this, dragged: &DraggedTab, _w, cx| {
+                            let at = this
+                                .tab_drop
+                                .take()
+                                .filter(|drop| drop.workspace == w)
+                                .map_or(t, |drop| drop.index);
+                            if this
+                                .session
+                                .move_tab_to(dragged.workspace, dragged.index, w, at)
+                            {
+                                this.after_tab_change(cx);
+                            }
+                            cx.notify();
+                        }));
+                    // Wrapped so the line can sit on the row's edge: above
+                    // this row, or below the last one for "after the end".
+                    div()
+                        .relative()
+                        .w_full()
+                        .child(row)
+                        .children((drop_at == Some(t)).then(|| line(true)))
+                        .children((t + 1 == count && drop_at == Some(count)).then(|| line(false)))
                         .into_any_element()
                 })
                 .collect()
         };
 
-        // The global group first, under a fixed TABS header: it is the
-        // implicit place tabs live, not something the user made and can act
-        // on, so it gets a section label rather than a workspace header.
-        let mut tabs = div()
-            .flex()
-            .flex_col()
-            .w_full()
-            .child(SectionHeader::new("tabs"));
+        // One TABS section for everything: the named workspaces as groups
+        // under their own headers, then the global tabs as the plain list —
+        // the implicit place tabs live, not something the user made.
+        let mut tabs = div().flex().flex_col().w_full().child(tabs_header(cx));
         let (global, named): (Vec<usize>, Vec<usize>) = (0..self.session.workspaces().len())
             .partition(|&w| self.session.workspaces()[w].is_global());
-        for w in global {
-            tabs = tabs.children(rows_of(self, w, cx));
-        }
 
-        // A faint "new tab" row after the last tab: `^t` for the mouse. At
-        // 0.3 it reads as an affordance rather than a tab, and it brightens
-        // under the pointer so it is plainly clickable.
-        tabs = tabs.child(quiet_row(
-            "tab-new",
-            "\u{f067}", // nf-fa-plus
-            "New tab",
-            cx.listener(|this, _event, window, cx| {
-                this.new_tab(cx);
-                this.focus_pane(Pane::Listing, window, cx);
-            }),
-            cx,
-        ));
-
-        // WORKSPACES, always: the section is where projects go, so it stays
-        // on screen even before the first one exists. Its header carries the
-        // borderless `+` once there is a workspace; until then the faint
-        // "new workspace" row is the whole section, and the `+` would only
-        // say the same thing twice.
-        // The same rule-with-air that divides places from tabs: the
-        // workspaces are a third kind of thing.
-        let section_gap = cx.theme().space().space(24.0);
-        tabs = tabs.child(
-            div()
-                .w_full()
-                .mt(px(section_gap))
-                .child(Separator::horizontal()),
-        );
-        tabs = tabs.child(workspaces_header(!named.is_empty(), cx));
-        if named.is_empty() {
-            tabs = tabs.child(quiet_row(
-                "ws-new-row",
-                "\u{f00a}", // nf-fa-th
-                "New workspace",
-                cx.listener(|this, _event, window, cx| {
-                    this.open_workspace_prompt(None, window, cx)
-                }),
-                cx,
-            ));
-        }
+        // The workspaces first, each a named group closed by a rule; the
+        // global tabs follow as the plain list at the bottom. One section:
+        // a workspace is a way of grouping tabs, not a third kind of thing.
         for w in named {
             // The header doubles as the drop target for its workspace: dropping
             // a tab on the group's name is the obvious gesture, and it stays
@@ -4839,15 +5225,32 @@ impl Explorer {
                 ));
             }
             // Each group closes with a rule, flush under its last row, so
-            // consecutive workspaces do not run into one list.
+            // consecutive workspaces do not run into the global list.
             tabs = tabs.child(Separator::horizontal());
         }
+        for w in global {
+            tabs = tabs.children(rows_of(self, w, cx));
+        }
+
+        // A faint "new tab" row after the last tab: `^t` for the mouse. At
+        // 0.3 it reads as an affordance rather than a tab, and it brightens
+        // under the pointer so it is plainly clickable.
+        tabs = tabs.child(quiet_row(
+            "tab-new",
+            "\u{f067}", // nf-fa-plus
+            "New tab",
+            cx.listener(|this, _event, window, cx| {
+                this.new_tab(cx);
+                this.focus_pane(Pane::Listing, window, cx);
+            }),
+            cx,
+        ));
 
         let pad = cx.theme().space().sm();
         // Places and tabs are two different kinds of thing — shortcuts above,
         // where-you-are below — so the rule between them gets real air, not
         // the row rhythm the sections inside each half keep.
-        let gap = section_gap;
+        let gap = cx.theme().space().space(24.0);
         div()
             .id("sidebar")
             .key_context("Sidebar")
@@ -4866,6 +5269,20 @@ impl Explorer {
                     .py(px(pad))
                     .overflow_y_scroll()
                     .track_scroll(&self.left_scroll)
+                    // The pointer leaving every tab row takes the insertion
+                    // line with it: drag-move fires here for every move, and
+                    // the bounds kept in `tab_drop` say whether it is still
+                    // over the row that set it.
+                    .on_drag_move::<DraggedTab>(cx.listener(
+                        |this, event: &DragMoveEvent<DraggedTab>, _w, cx| {
+                            if let Some(drop) = this.tab_drop
+                                && !drop.bounds.contains(&event.event.position)
+                            {
+                                this.tab_drop = None;
+                                cx.notify();
+                            }
+                        },
+                    ))
                     .child(column)
                     .child(div().w_full().mt(px(gap)).child(Separator::horizontal()))
                     .child(tabs),
@@ -4913,14 +5330,33 @@ impl Explorer {
                 // Collected up front so the listing borrow ends before
                 // `cx.listener` needs `this` again.
                 let cursor = this.cursors.get(&this.tab_id()).copied();
+                // The marked set, built once for the frame: every marked row
+                // offers the whole set as its drag payload.
+                let marked: Arc<Vec<DragItem>> = Arc::new(
+                    this.selection()
+                        .into_iter()
+                        .filter_map(|index| this.listing()?.get(index))
+                        .map(|entry| DragItem {
+                            path: entry.path.clone(),
+                            name: entry.name.clone(),
+                            is_dir: entry.kind.is_dir(),
+                        })
+                        .collect(),
+                );
                 let Some(listing) = this.listings.get(&this.tab_id()) else {
                     return Vec::new();
                 };
                 let visible = listing.visible(this.show_hidden);
-                let rows: Vec<(usize, usize, Entry)> = range
+                let rows: Vec<(usize, usize, Entry, bool)> = range
                     .filter_map(|position| {
                         let index = *visible.get(position)?;
-                        Some((position, index, listing.get(index)?.clone()))
+                        let entry = listing.get(index)?;
+                        Some((
+                            position,
+                            index,
+                            entry.clone(),
+                            this.is_selected(&entry.name),
+                        ))
                     })
                     .collect();
 
@@ -4929,36 +5365,89 @@ impl Explorer {
                 // per row rather than a scan of every change (§6.9).
                 let states: Vec<Option<git::State>> = rows
                     .iter()
-                    .map(|(_, _, entry)| this.git_state(&entry.path))
+                    .map(|(_, _, entry, _)| this.git_state(&entry.path))
                     .collect();
 
                 rows.into_iter()
                     .zip(states)
-                    .map(|((position, index, entry), state)| {
-                        entry_row(position, &entry, cursor == Some(index), state, cx)
-                            .on_click(cx.listener(
-                                move |this, event: &gpui::ClickEvent, window, cx| {
-                                    // Single click selects, double opens — the
-                                    // convention everywhere else in the desktop.
-                                    this.focus_pane(Pane::Listing, window, cx);
+                    .map(|((position, index, entry, is_selected), state)| {
+                        // A marked row drags the whole selection; an unmarked
+                        // one drags itself alone, and leaves the marks as they
+                        // are — the convention everywhere else in the desktop.
+                        let items = if is_selected {
+                            marked.clone()
+                        } else {
+                            Arc::new(vec![DragItem {
+                                path: entry.path.clone(),
+                                name: entry.name.clone(),
+                                is_dir: entry.kind.is_dir(),
+                            }])
+                        };
+                        let is_dir = entry.kind.is_dir();
+                        let dest = entry.path.clone();
+                        let mut row = entry_row(
+                            position,
+                            &entry,
+                            cursor == Some(index),
+                            is_selected,
+                            state,
+                            cx,
+                        )
+                        .draggable(
+                            DraggedEntries { items },
+                            |payload: &DraggedEntries, _position, _window, cx: &mut App| {
+                                drag_preview(payload.label(), cx)
+                            },
+                        )
+                        .on_click(
+                            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                                // Single click selects, double opens — the
+                                // convention everywhere else in the desktop.
+                                // Modifiers mark: ^click flips one row,
+                                // \u{21e7}click marks the run from the cursor.
+                                this.focus_pane(Pane::Listing, window, cx);
+                                let modifiers = event.modifiers();
+                                if modifiers.shift {
+                                    let anchor = this.cursor().unwrap_or(index);
+                                    this.mark_range(anchor, index);
+                                    this.set_cursor(Some(index));
+                                } else if modifiers.control {
+                                    this.toggle_mark(index);
+                                    this.set_cursor(Some(index));
+                                } else {
+                                    this.clear_selection();
                                     this.set_cursor(Some(index));
                                     if event.click_count() >= 2 {
                                         this.open_selected(cx);
                                     }
-                                    cx.notify();
-                                },
-                            ))
-                            // Right click: cursor follows the click — the menu
-                            // acts on the entry under it — and the card opens
-                            // at the pointer.
-                            .on_right_click(cx.listener(
-                                move |this, event: &gpui::MouseDownEvent, window, cx| {
-                                    this.focus_pane(Pane::Listing, window, cx);
-                                    this.set_cursor(Some(index));
-                                    this.open_entry_menu(Some(event.position), window, cx);
-                                },
-                            ))
-                            .into_any_element()
+                                }
+                                cx.notify();
+                            }),
+                        )
+                        // Right click: cursor follows the click — the menu
+                        // acts on the entry under it — and the card opens
+                        // at the pointer. Marks survive only when the click
+                        // lands on one of them.
+                        .on_right_click(cx.listener(
+                            move |this, event: &gpui::MouseDownEvent, window, cx| {
+                                this.focus_pane(Pane::Listing, window, cx);
+                                if !this.is_selected(&entry.name) {
+                                    this.clear_selection();
+                                }
+                                this.set_cursor(Some(index));
+                                this.open_entry_menu(Some(event.position), window, cx);
+                            },
+                        ));
+                        // A directory is somewhere to drop; a file is not, and
+                        // never lights up — so what lights up can be trusted.
+                        if is_dir {
+                            row = row.drag_over::<DraggedEntries>(drop_highlight).on_drop(
+                                cx.listener(move |this, dragged: &DraggedEntries, _w, cx| {
+                                    this.drop_entries(dragged, dest.clone(), cx);
+                                }),
+                            );
+                        }
+                        row.into_any_element()
                     })
                     .collect()
             }),
@@ -5037,67 +5526,85 @@ impl Explorer {
         // actions live in the status bar with the directory's facts.
         let entry = self.cursor().and_then(|i| self.listing()?.get(i)).cloned();
         let selected = entry.is_some();
+        // Glyphs alone unless the setting asks for the words; the verb is
+        // then a hover away.
+        let compact = !self.config.button_labels;
         let mut actions: Vec<ActionButton> = Vec::new();
         if selected {
             actions.push(
                 ActionButton::new("detail-open")
                     .glyph("\u{f08e}") // nf-fa-external_link
                     .label("Open")
+                    .compact(compact)
                     .on_click(cx.listener(|this, _e, _w, cx| this.open_selected(cx))),
             );
             actions.push(
                 ActionButton::new("detail-agent")
                     .glyph("\u{f06a9}") // nf-md-robot
                     .label("Agent")
+                    .compact(compact)
                     .on_click(cx.listener(|this, _e, window, cx| this.ask_agent(window, cx))),
             );
             actions.push(
                 ActionButton::new("detail-share")
                     .glyph("\u{f1e0}") // nf-fa-share_alt
                     .label("Share")
+                    .compact(compact)
                     .on_click(cx.listener(|this, _e, _w, cx| this.share_selected(cx))),
             );
             actions.push(
                 ActionButton::new("detail-copy")
                     .glyph("\u{f0c5}") // nf-fa-copy
                     .label("Copy")
+                    .compact(compact)
                     .on_click(cx.listener(|this, _e, window, cx| this.copy_selected(window, cx))),
             );
             actions.push(
                 ActionButton::new("detail-cut")
                     .glyph("\u{f0c4}") // nf-fa-scissors
                     .label("Cut")
+                    .compact(compact)
                     .on_click(cx.listener(|this, _e, _w, cx| this.cut_selected(cx))),
             );
             actions.push(
                 ActionButton::new("detail-path")
                     .glyph("\u{f0c1}") // nf-fa-link
                     .label("Path")
+                    .compact(compact)
                     .on_click(cx.listener(|this, _e, _w, cx| this.copy_path_selected(cx))),
             );
             actions.push(
                 ActionButton::new("detail-move")
                     .glyph("\u{f061}") // nf-fa-arrow_right
                     .label("Move")
+                    .compact(compact)
                     .on_click(cx.listener(|this, _e, window, cx| this.move_selected(window, cx))),
             );
             actions.push(
                 ActionButton::new("detail-zip")
                     .glyph("\u{f1c6}") // nf-fa-file_archive
                     .label("Zip")
+                    .compact(compact)
                     .on_click(cx.listener(|this, _e, _w, cx| this.compress_selected(cx))),
             );
             actions.push(
                 ActionButton::new("detail-delete")
                     .glyph("\u{f1f8}") // nf-fa-trash
                     .label("Delete")
+                    .compact(compact)
                     .on_click(cx.listener(|this, _e, window, cx| this.delete_selected(window, cx))),
             );
         }
         // Directories additionally pin — a file cannot live in the sidebar.
         if let Some(entry) = entry.as_ref().filter(|e| e.kind.is_dir()) {
             let state = self.pin_state(&entry.path);
-            actions.push(pin_button("detail-pin", entry.path.clone(), state, cx));
+            actions.push(pin_button(
+                "detail-pin",
+                entry.path.clone(),
+                state,
+                compact,
+                cx,
+            ));
         }
         // The expand affordance rides with the other verbs (on request).
         if expandable {
@@ -5105,6 +5612,7 @@ impl Explorer {
                 ActionButton::new("preview-fullscreen")
                     .glyph("\u{f06e}") // nf-fa-eye
                     .label("Preview")
+                    .compact(compact)
                     .on_click(cx.listener(|this, _e, _w, cx| this.toggle_preview(cx))),
             );
         }
@@ -5429,7 +5937,7 @@ impl Explorer {
                     Row::new(("copy-row", i))
                         .cursor(i == cursor)
                         .focused(true)
-                        .child(div().flex_1().min_w(px(0.)).overflow_hidden().child(label))
+                        .child(div().flex_1().min_w(px(0.)).truncate().child(label))
                         .child(
                             div()
                                 .flex_shrink_0()
@@ -5486,6 +5994,34 @@ impl Explorer {
                     .child(div().flex().flex_col().children(separated(rows)))
                     .hint("\u{23ce}", "copy")
                     .hint("\u{2193}\u{2191}", "select")
+                    .hint("esc", "close")
+                    .on_dismiss(dismiss)
+                    .into_any_element()
+            }
+            Overlay::Refused {
+                title,
+                subtitle,
+                reasons,
+            } => {
+                let theme = cx.theme();
+                let (urgent, caption) = (theme.urgent(), theme.type_scale().caption());
+                let (row_height, pad_x) = (
+                    theme.space().control_height(),
+                    theme.space().row_padding_x(),
+                );
+                let rows = reasons.iter().map(|reason| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .h(px(row_height))
+                        .px(px(pad_x))
+                        .text_size(px(caption))
+                        .text_color(urgent)
+                        .child(reason.clone())
+                });
+                Modal::new("refused", *title)
+                    .subtitle(subtitle.clone())
+                    .child(div().flex().flex_col().children(rows))
                     .hint("esc", "close")
                     .on_dismiss(dismiss)
                     .into_any_element()
@@ -5560,14 +6096,15 @@ impl Explorer {
                         "pick",
                     ),
                     PathPurpose::CreateFile => (
-                        "New file",
-                        "the full path of the file to create".to_string(),
+                        "New",
+                        "the full path of the file to create \u{2014} end it with / to make a directory instead"
+                            .to_string(),
                         "create",
                         "complete",
                     ),
                 };
-                // In the file picker a directory row completes the field; in
-                // the others it is the answer.
+                // In the maker a directory row completes the field; in the
+                // others it is the answer.
                 let completes = matches!(purpose, PathPurpose::CreateFile);
 
                 let mut rows = suggestions
@@ -6571,6 +7108,8 @@ impl Explorer {
             )
         };
         let git = self.git_bar(cx);
+        let marked = self.selected_count();
+        let compact = !self.config.button_labels;
 
         // One value everywhere (on request): the same small inset on every
         // side and between items, so the bar's rhythm is a single number —
@@ -6594,6 +7133,7 @@ impl Explorer {
                     .items_center()
                     .gap(px(inset))
                     .child(div().child(format!("{dirs} directories · {files} files")))
+                    .children((marked > 0).then(|| div().child(format!("{marked} selected"))))
                     .children(git)
                     // What the last action had to say for itself (M9). One
                     // line, urgent, gone again in a few seconds.
@@ -6623,18 +7163,20 @@ impl Explorer {
                     .child({
                         let path = self.current_path();
                         let state = self.pin_state(&path);
-                        pin_button("act-pin", path, state, cx)
+                        pin_button("act-pin", path, state, compact, cx)
                     })
                     .child(
                         ActionButton::new("act-terminal")
                             .glyph("\u{f120}") // nf-fa-terminal
                             .label("Terminal")
+                            .compact(compact)
                             .on_click(cx.listener(|this, _e, _w, cx| this.open_terminal_here(cx))),
                     )
                     .child(
                         ActionButton::new("act-agent")
                             .glyph("\u{f06a9}") // nf-md-robot
                             .label("Agent")
+                            .compact(compact)
                             .on_click(
                                 cx.listener(|this, _e, window, cx| this.ask_agent_here(window, cx)),
                             ),
@@ -6643,20 +7185,26 @@ impl Explorer {
                         ActionButton::new("act-share")
                             .glyph("\u{f1e0}") // nf-fa-share_alt
                             .label("Share")
+                            .compact(compact)
                             .on_click(cx.listener(|this, _e, _w, cx| this.share_here(cx))),
                     )
                     .child(
-                        ActionButton::new("act-new-file")
+                        ActionButton::new("act-new")
                             .glyph("\u{f067}") // nf-fa-plus
-                            .label("New file")
+                            .label("New")
+                            .compact(compact)
                             .on_click(cx.listener(|this, _e, window, cx| {
                                 this.create_file_here(window, cx)
                             })),
                     )
                     .child(
-                        ActionButton::new("help").glyph("?").label("Help").on_click(
-                            cx.listener(|this, _e, window, cx| this.show_help(window, cx)),
-                        ),
+                        ActionButton::new("help")
+                            .glyph("?")
+                            .label("Help")
+                            .compact(compact)
+                            .on_click(
+                                cx.listener(|this, _e, window, cx| this.show_help(window, cx)),
+                            ),
                     ),
             )
             .into_any_element()
@@ -6779,7 +7327,7 @@ fn place_row(
             div()
                 .flex_1()
                 .min_w(px(0.))
-                .overflow_hidden()
+                .truncate()
                 .child(place.label.clone()),
         )
 }
@@ -6807,17 +7355,19 @@ fn quiet_row(
                         .flex_shrink_0()
                         .child(glyph),
                 )
-                .child(div().flex_1().min_w(px(0.)).overflow_hidden().child(label))
+                .child(div().flex_1().min_w(px(0.)).truncate().child(label))
                 .on_click(on_click),
         )
         .into_any_element()
 }
 
-/// The WORKSPACES section header, with a borderless `+` when asked for.
+/// The TABS section header, with the borderless "new workspace" button.
 ///
-/// Borderless like a tab row's `×`, not an `ActionButton`: in a section
-/// header a hairline outline reads as a form control.
-fn workspaces_header(with_add: bool, cx: &mut Context<Explorer>) -> AnyElement {
+/// A grid with a plus, not the bare plus the "New tab" rows use: the two
+/// verbs sit a few rows apart and must not read as the same one. Borderless
+/// like a tab row's `×`, not an `ActionButton`: in a section header a
+/// hairline outline reads as a form control.
+fn tabs_header(cx: &mut Context<Explorer>) -> AnyElement {
     let theme = cx.theme();
     let pad_x = theme.space().row_padding_x();
     let dim = theme.dim_foreground_on(theme.tokens.palette.lighter_background());
@@ -6832,17 +7382,15 @@ fn workspaces_header(with_add: bool, cx: &mut Context<Explorer>) -> AnyElement {
             div()
                 .flex_1()
                 .min_w(px(0.))
-                .child(SectionHeader::new("workspaces")),
+                .child(SectionHeader::new("tabs")),
         )
-        .children(with_add.then(|| {
-            quiet_button(
-                "ws-new",
-                "\u{f067}", // nf-fa-plus
-                dim,
-                cx.listener(|this, _e, window, cx| this.open_workspace_prompt(None, window, cx)),
-                cx,
-            )
-        }))
+        .child(quiet_button(
+            "ws-new",
+            "\u{f11da}", // nf-md-view_grid_plus_outline
+            dim,
+            cx.listener(|this, _e, window, cx| this.open_workspace_prompt(None, window, cx)),
+            cx,
+        ))
         .into_any_element()
 }
 
@@ -6880,12 +7428,14 @@ fn drop_header(
             style.bg(cx.theme().selected_fill())
         })
         .on_drop(cx.listener(move |this, dragged: &DraggedTab, _window, cx| {
+            this.tab_drop = None;
             if this
                 .session
                 .move_tab(dragged.workspace, dragged.index, workspace)
             {
                 this.after_tab_change(cx);
             }
+            cx.notify();
         }))
         // The name is the collapse toggle: a chevron says which way it will
         // go, and a collapsed group keeps its header so the tabs inside are
@@ -6974,6 +7524,17 @@ fn quiet_button(
         .into_any_element()
 }
 
+/// Where a dragged tab would be inserted: workspace, position in its tab
+/// list (`tabs.len()` for "after the last"), and the bounds of the row the
+/// pointer is over — kept so the sidebar can tell when the pointer has left
+/// it, since gpui reports drag moves everywhere and drag leaves nowhere.
+#[derive(Clone, Copy, Debug)]
+struct TabDrop {
+    workspace: usize,
+    index: usize,
+    bounds: Bounds<Pixels>,
+}
+
 /// The payload of a tab drag: where it came from.
 ///
 /// A struct rather than a tuple so gpui's type-keyed drop routing cannot
@@ -7018,63 +7579,129 @@ fn tab_row(
         // The close box carries its own inset; the row's would double it.
         row = row.padding_right(theme.space().sm());
     }
-    row
-        .draggable(DraggedTab { workspace, index }, {
-            let label = label.clone();
-            move |_payload, _position, _window, cx: &mut App| {
-                // The preview is detached from the row, so it needs its own
-                // background — otherwise it reads as text floating over the UI.
-                let theme = cx.theme();
-                let preview = DragPreview {
-                    label: label.clone(),
-                    background: theme.surface(),
-                    border: theme.border(),
-                    text: theme.bright_foreground(),
-                    radius: theme.radius(),
-                    padding: theme.space().row_padding_x(),
-                    height: theme.space().control_height(),
-                };
-                cx.new(|_| preview)
-            }
-        })
-        .child(
-            div()
-                .w(px(caption * 1.6))
-                .flex_shrink_0()
-                .text_color(if active { accent } else { dim })
-                .child("\u{f114}"), // nf-fa-folder_o
-        )
-        .child(div().flex_1().min_w(px(0.)).overflow_hidden().child(label))
-        .children(on_close.map(|on_close| {
-            // Borderless on purpose, unlike an `ActionButton`: inside a row a
-            // hairline outline reads as a form control. Invisible rather than
-            // absent when the pointer is elsewhere, so revealing it never
-            // shifts the label.
-            div()
-                .id("close")
-                .flex()
-                .flex_shrink_0()
-                .items_center()
-                .justify_center()
-                .w(px(caption * 1.6))
-                .h(px(caption * 1.6))
-                .rounded(px(radius.min(2.0)))
-                .text_size(px(caption))
-                .text_color(dim)
-                .invisible()
-                .group_hover(omarchy_ui::ROW_GROUP, |style| style.visible())
-                .hover(|style| style.bg(hover_fill).text_color(bright))
-                .on_click(move |event, window, cx| {
-                    // The row underneath activates on click; closing must not
-                    // also switch to the tab being removed.
-                    cx.stop_propagation();
-                    on_close(event, window, cx);
-                })
-                .child("\u{f00d}") // nf-fa-times
-        }))
+    row.draggable(DraggedTab { workspace, index }, {
+        let label = label.clone();
+        move |_payload, _position, _window, cx: &mut App| drag_preview(label.clone(), cx)
+    })
+    .child(
+        div()
+            .w(px(caption * 1.6))
+            .flex_shrink_0()
+            .text_color(if active { accent } else { dim })
+            .child("\u{f114}"), // nf-fa-folder_o
+    )
+    .child(div().flex_1().min_w(px(0.)).truncate().child(label))
+    .children(on_close.map(|on_close| {
+        // Borderless on purpose, unlike an `ActionButton`: inside a row a
+        // hairline outline reads as a form control. Invisible rather than
+        // absent when the pointer is elsewhere, so revealing it never
+        // shifts the label.
+        div()
+            .id("close")
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .w(px(caption * 1.6))
+            .h(px(caption * 1.6))
+            .rounded(px(radius.min(2.0)))
+            .text_size(px(caption))
+            .text_color(dim)
+            .invisible()
+            .group_hover(omarchy_ui::ROW_GROUP, |style| style.visible())
+            .hover(|style| style.bg(hover_fill).text_color(bright))
+            .on_click(move |event, window, cx| {
+                // The row underneath activates on click; closing must not
+                // also switch to the tab being removed.
+                cx.stop_propagation();
+                on_close(event, window, cx);
+            })
+            .child("\u{f00d}") // nf-fa-times
+    }))
 }
 
-/// What follows the pointer while a tab is being dragged.
+/// The payload of an entry drag: the files being carried.
+///
+/// Its own struct, like [`DraggedTab`], because gpui routes drops by type.
+/// The items sit behind an `Arc`: every marked row offers the same set, and
+/// the listing rebuilds its rows each frame, so the set is built once per
+/// frame and shared rather than cloned per row.
+#[derive(Clone, Debug)]
+struct DraggedEntries {
+    items: Arc<Vec<DragItem>>,
+}
+
+#[derive(Clone, Debug)]
+struct DragItem {
+    path: PathBuf,
+    name: String,
+    is_dir: bool,
+}
+
+impl DraggedEntries {
+    /// What the drag preview and the notices call the load.
+    fn label(&self) -> String {
+        match self.items.as_slice() {
+            [one] => format!("\u{201c}{}\u{201d}", one.name),
+            many => format!("{} items", many.len()),
+        }
+    }
+}
+
+/// Why `items` cannot be dropped into `dest` — empty when they can.
+///
+/// Checked before anything moves, and all of them at once, so the refusal
+/// names every problem rather than the first: a drop of five files that
+/// stops at the third has done something, and nobody asked for that.
+fn drop_refusals(items: &[DragItem], dest: &Path) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if !dest.is_dir() {
+        reasons.push(format!("{} is not a directory", display_path(dest)));
+    }
+    for item in items {
+        let name = format!("\u{201c}{}\u{201d}", item.name);
+        // `symlink_metadata`, not `exists`: a dangling link is still a thing
+        // that can be moved.
+        if item.path.symlink_metadata().is_err() {
+            reasons.push(format!("{name} is no longer there"));
+        } else if item.path.parent() == Some(dest) {
+            reasons.push(format!("{name} is already there"));
+        } else if item.is_dir && dest.starts_with(&item.path) {
+            reasons.push(format!("{name} cannot be moved into itself"));
+        }
+    }
+    reasons
+}
+
+/// The highlight a row takes while a dragged set of entries is over it: the
+/// same fill a workspace header shows for a tab, so "you can drop here"
+/// reads the same everywhere.
+fn drop_highlight(
+    style: StyleRefinement,
+    _dragged: &DraggedEntries,
+    _window: &mut Window,
+    cx: &mut App,
+) -> StyleRefinement {
+    style.bg(cx.theme().selected_fill())
+}
+
+/// The floating label for a drag. Detached from the row, so it needs its own
+/// background — otherwise it reads as text floating over the UI.
+fn drag_preview(label: String, cx: &mut App) -> Entity<DragPreview> {
+    let theme = cx.theme();
+    let preview = DragPreview {
+        label,
+        background: theme.surface(),
+        border: theme.border(),
+        text: theme.bright_foreground(),
+        radius: theme.radius(),
+        padding: theme.space().row_padding_x(),
+        height: theme.space().control_height(),
+    };
+    cx.new(|_| preview)
+}
+
+/// What follows the pointer while something is being dragged.
 struct DragPreview {
     label: String,
     background: gpui::Hsla,
@@ -7160,6 +7787,7 @@ fn entry_row(
     position: usize,
     entry: &Entry,
     is_cursor: bool,
+    is_selected: bool,
     git: Option<git::State>,
     cx: &mut App,
 ) -> Row {
@@ -7190,6 +7818,7 @@ fn entry_row(
 
     Row::new(("entry", position))
         .cursor(is_cursor)
+        .selected(is_selected)
         .focused(true)
         .child(
             div()
@@ -7223,7 +7852,7 @@ fn entry_row(
             div()
                 .flex_1()
                 .min_w(px(0.))
-                .overflow_hidden()
+                .truncate()
                 .child(entry.name.clone()),
         )
         .children(entry.is_symlink.then(|| {
@@ -7806,6 +8435,74 @@ fn hex_rows(bytes: &[u8], per_row: usize) -> Vec<String> {
 #[cfg(test)]
 mod chrome_tests {
     use super::*;
+
+    fn drop_scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("omafiles-drop-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn item(path: &Path) -> DragItem {
+        DragItem {
+            path: path.to_path_buf(),
+            name: path.file_name().unwrap().to_string_lossy().into_owned(),
+            is_dir: path.is_dir(),
+        }
+    }
+
+    #[test]
+    fn a_clean_drop_has_nothing_to_refuse() {
+        let dir = drop_scratch("clean");
+        let (src, dest) = (dir.join("src"), dir.join("dest"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(src.join("a.txt"), "a").unwrap();
+        std::fs::create_dir(src.join("sub")).unwrap();
+        let items = [item(&src.join("a.txt")), item(&src.join("sub"))];
+        assert!(drop_refusals(&items, &dest).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_bad_item_is_named_and_a_good_one_is_not() {
+        let dir = drop_scratch("bad");
+        let (src, dest) = (dir.join("src"), dir.join("dest"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(src.join("fine.txt"), "").unwrap();
+        std::fs::create_dir_all(dest.join("parent")).unwrap();
+        std::fs::write(dest.join("parent/here.txt"), "").unwrap();
+        let gone = src.join("gone.txt");
+        let items = [
+            item(&src.join("fine.txt")),
+            item(&dest.join("parent/here.txt")),
+            DragItem {
+                path: gone.clone(),
+                name: "gone.txt".into(),
+                is_dir: false,
+            },
+            item(&dest.join("parent")),
+        ];
+        // Dropping into a directory inside one of the dragged directories.
+        let reasons = drop_refusals(&items, &dest.join("parent"));
+        assert_eq!(reasons.len(), 3, "{reasons:?}");
+        assert!(reasons[0].contains("here.txt") && reasons[0].contains("already there"));
+        assert!(reasons[1].contains("gone.txt") && reasons[1].contains("no longer"));
+        assert!(reasons[2].contains("parent") && reasons[2].contains("into itself"));
+        assert!(!reasons.iter().any(|r| r.contains("fine.txt")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_destination_is_refused() {
+        let dir = drop_scratch("nodest");
+        std::fs::write(dir.join("a.txt"), "").unwrap();
+        let reasons = drop_refusals(&[item(&dir.join("a.txt"))], &dir.join("nowhere"));
+        assert_eq!(reasons.len(), 1);
+        assert!(reasons[0].contains("not a directory"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn middle_truncate_keeps_the_start_and_the_end() {
