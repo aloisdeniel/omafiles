@@ -1206,6 +1206,33 @@ enum Pane {
     Listing,
 }
 
+/// The two side panels, as the things that can be resized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelSide {
+    Left,
+    Right,
+}
+
+/// A panel edge being dragged: which one, where the pointer started, and
+/// how wide the panel was then. The width is applied to the config as the
+/// pointer moves and written to disk when the button comes up.
+#[derive(Debug, Clone, Copy)]
+struct PanelResize {
+    side: PanelSide,
+    start_x: f32,
+    start_width: f32,
+}
+
+/// The share of the window the centre column always keeps: however wide
+/// the panels are dragged, the listing stays at least this fraction. Below
+/// it the listing would be a sliver, and the panels are about the listing.
+const CENTER_MIN_FRACTION: f32 = 0.3;
+
+/// The narrowest a panel goes, as a share of `dropdown-width`. Half the
+/// default keeps every row's icon and a few characters of its label; below
+/// that the panel says nothing, and collapsing it is the honest gesture.
+const PANEL_MIN_FACTOR: f32 = 0.5;
+
 /// What a Pin button can say about a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PinState {
@@ -1276,6 +1303,11 @@ struct Explorer {
     /// window restores the panels rather than leaving them shut.
     left_open: bool,
     right_open: bool,
+    /// The panel edge under the pointer while it is being dragged.
+    resizing: Option<PanelResize>,
+    /// The window's width as of the last frame, so the panel widths can be
+    /// clamped against it from code that only has the app context.
+    viewport_width: f32,
     /// Scroll state for the two panels, so their content can overflow.
     left_scroll: gpui::ScrollHandle,
     right_scroll: gpui::ScrollHandle,
@@ -1421,6 +1453,8 @@ impl Explorer {
             overlay: None,
             left_open: true,
             right_open: true,
+            resizing: None,
+            viewport_width: 0.0,
             left_scroll: gpui::ScrollHandle::new(),
             right_scroll: gpui::ScrollHandle::new(),
             input: input.clone(),
@@ -2921,7 +2955,10 @@ impl Explorer {
         self.clipboard = Some(entry.path);
         self.clipboard_cut = true;
         self.inform_user(
-            format!("cut \u{201c}{}\u{201d} \u{2014} paste to move it", entry.name),
+            format!(
+                "cut \u{201c}{}\u{201d} \u{2014} paste to move it",
+                entry.name
+            ),
             cx,
         );
     }
@@ -2935,7 +2972,10 @@ impl Explorer {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(
             entry.path.to_string_lossy().into_owned(),
         ));
-        self.inform_user(format!("copied the path of \u{201c}{}\u{201d}", entry.name), cx);
+        self.inform_user(
+            format!("copied the path of \u{201c}{}\u{201d}", entry.name),
+            cx,
+        );
     }
 
     /// The copy-image modal, with its conversions started.
@@ -3001,7 +3041,9 @@ impl Explorer {
                 let live = this
                     .update(cx, |this, cx| match &mut this.overlay {
                         Some(Overlay::CopyImage {
-                            path: open, encoded, ..
+                            path: open,
+                            encoded,
+                            ..
                         }) if *open == path => {
                             if let Some(slot) = encoded.get_mut(i) {
                                 *slot = Some(result);
@@ -3057,10 +3099,8 @@ impl Explorer {
                         .background_spawn(async move { imageops::copy_png_to_clipboard(&bytes) })
                         .await;
                     let _ = this.update(cx, |this, cx| match outcome {
-                        Ok(()) => this.inform_user(
-                            format!("copied \u{201c}{name}\u{201d} as PNG{size}"),
-                            cx,
-                        ),
+                        Ok(()) => this
+                            .inform_user(format!("copied \u{201c}{name}\u{201d} as PNG{size}"), cx),
                         Err(why) => this.notify_user(why, cx),
                     });
                 }));
@@ -3125,28 +3165,23 @@ impl Explorer {
                 }
                 gpui::ClipboardEntry::ExternalPaths(paths) => {
                     if let Some(source) = paths.paths().first().cloned() {
-                        self.land_file(
-                            cx,
-                            move || fileops::copy_into(&source, &dest),
-                            "pasted",
-                        );
+                        self.land_file(cx, move || fileops::copy_into(&source, &dest), "pasted");
                         return;
                     }
                 }
                 gpui::ClipboardEntry::String(text) => {
                     let candidate = PathBuf::from(expand_tilde(text.text().trim()));
                     if candidate.is_absolute() && candidate.exists() {
-                        self.land_file(
-                            cx,
-                            move || fileops::copy_into(&candidate, &dest),
-                            "pasted",
-                        );
+                        self.land_file(cx, move || fileops::copy_into(&candidate, &dest), "pasted");
                         return;
                     }
                 }
             }
         }
-        self.notify_user("nothing on the clipboard to paste as a file".to_string(), cx);
+        self.notify_user(
+            "nothing on the clipboard to paste as a file".to_string(),
+            cx,
+        );
     }
 
     /// Run a file-making operation in the background and put the cursor on
@@ -3207,12 +3242,13 @@ impl Explorer {
             self.clipboard_cut = false;
         }
         self._action_task = Some(cx.spawn(async move |this, cx| {
-            let outcome = cx.background_spawn(async move { fileops::trash(&path) }).await;
+            let outcome = cx
+                .background_spawn(async move { fileops::trash(&path) })
+                .await;
             let _ = this.update(cx, |this, cx| match outcome {
-                Ok(()) => this.inform_user(
-                    format!("moved \u{201c}{name}\u{201d} to the trash"),
-                    cx,
-                ),
+                Ok(()) => {
+                    this.inform_user(format!("moved \u{201c}{name}\u{201d} to the trash"), cx)
+                }
                 Err(message) => this.notify_user(message, cx),
             });
         }));
@@ -4359,6 +4395,7 @@ impl Render for Explorer {
         if self.tab_drop.is_some() && !cx.has_active_drag() {
             self.tab_drop = None;
         }
+        self.viewport_width = f32::from(window.viewport_size().width);
         // One call site, at the top of the frame, rather than in each of the
         // dozen places the cursor can move. It is a key comparison when nothing
         // changed, and it cannot be forgotten the way a dozen calls can.
@@ -4635,6 +4672,28 @@ impl Render for Explorer {
                 this.left_open = !this.left_open;
                 cx.notify();
             }))
+            // A panel resize is tracked here, on the container that spans
+            // the window, so the drag keeps following the pointer once it
+            // has left the hairline it started on.
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                if this.resizing.is_none() {
+                    return;
+                }
+                // The button came up somewhere the window did not see it.
+                if event.pressed_button != Some(gpui::MouseButton::Left) {
+                    this.end_panel_resize(cx);
+                    return;
+                }
+                this.drag_panel_edge(f32::from(event.position.x), cx);
+            }))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _e, _, cx| this.end_panel_resize(cx)),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _e, _, cx| this.end_panel_resize(cx)),
+            )
             .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| {
                 this.right_open = !this.right_open;
                 cx.notify();
@@ -4870,7 +4929,7 @@ impl Explorer {
 
     /// The sidebar with its bar on top, the shape it takes docked or floating.
     fn sidebar_column(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let width = cx.theme().space().dropdown_width();
+        let width = self.panel_width(PanelSide::Left, cx);
         div()
             .flex()
             .flex_col()
@@ -4901,12 +4960,20 @@ impl Explorer {
         // The sidebar, or the strip that expands it again; a narrow window
         // floats the panel over the listing, so the strip stays as the way in.
         let mut row = div().flex().flex_row().flex_1().min_h(px(0.));
-        let left = if !narrow && self.left_open {
-            self.sidebar_column(cx)
+        // The rule beside a docked panel is also its grip; the strip's rule
+        // is only a rule, since a collapsed panel has no width to drag.
+        let (left, rule) = if !narrow && self.left_open {
+            (
+                self.sidebar_column(cx),
+                self.resize_handle(PanelSide::Left, cx),
+            )
         } else {
-            self.sidebar_strip(cx)
+            (
+                self.sidebar_strip(cx),
+                Separator::vertical().into_any_element(),
+            )
         };
-        row = row.child(left).child(Separator::vertical());
+        row = row.child(left).child(rule);
 
         // The listing and the detail panel share one navigation bar; the
         // sidebar has its own (on request), so the top of the window splits
@@ -4923,7 +4990,7 @@ impl Explorer {
             content = content.child(self.listing_pane(cx));
             if !narrow && self.right_open {
                 content = content
-                    .child(Separator::vertical())
+                    .child(self.resize_handle(PanelSide::Right, cx))
                     .child(self.detail_pane(cx));
             }
         }
@@ -4939,6 +5006,140 @@ impl Explorer {
         row.child(main).into_any_element()
     }
 
+    /// A panel's width for this frame: the one the user dragged it to, or
+    /// the theme's `dropdown-width` until they have, kept between the floor
+    /// and whatever the centre column can spare beside the other panel.
+    fn panel_width(&self, side: PanelSide, cx: &App) -> f32 {
+        let default = cx.theme().space().dropdown_width();
+        let (floor, room) = self.panel_bounds(default);
+        let simple = |asked: Option<u32>| {
+            asked
+                .map_or(default, |w| w as f32)
+                .clamp(floor, room.max(floor))
+        };
+        // The other panel, at its own simple clamp, is what this one has to
+        // fit beside. One-sided on purpose: two panels each clamped against
+        // the other's clamped width would chase in circles. A floating panel
+        // has no neighbour, and an expanded preview has hidden the right one.
+        let docked = self.viewport_width >= default * 3.0;
+        let other = match side {
+            PanelSide::Left if docked && self.right_open && !self.preview_expanded() => {
+                simple(self.config.detail_width)
+            }
+            PanelSide::Right if docked && self.left_open => simple(self.config.sidebar_width),
+            _ => 0.0,
+        };
+        let asked = match side {
+            PanelSide::Left => self.config.sidebar_width,
+            PanelSide::Right => self.config.detail_width,
+        };
+        asked
+            .map_or(default, |w| w as f32)
+            .clamp(floor, (room - other).max(floor))
+    }
+
+    /// The floor every panel keeps, and the width the two panels may share
+    /// in this window once the centre column has its minimum.
+    fn panel_bounds(&self, default: f32) -> (f32, f32) {
+        let floor = (default * PANEL_MIN_FACTOR).round();
+        let room = (self.viewport_width * (1.0 - CENTER_MIN_FRACTION)).round();
+        (floor, room)
+    }
+
+    /// The rule beside a docked panel, widened into a grip: the hairline
+    /// stays where it was and a few invisible pixels either side of it take
+    /// the pointer. Only drawn while the panel is open — collapsed, there is
+    /// nothing to resize, and the rule is a plain rule.
+    fn resize_handle(&mut self, side: PanelSide, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let thickness = theme.space().hairline();
+        // The grip's reach, either side of the rule. Negative margins keep
+        // it from moving the panes: the layout still sees one hairline.
+        let reach = theme.space().sm().max(4.0);
+        let rule = theme.border().opacity(0.2);
+        let dragging = self.resizing.is_some_and(|r| r.side == side);
+        let accent = theme.accent();
+        let id = match side {
+            PanelSide::Left => "resize-left",
+            PanelSide::Right => "resize-right",
+        };
+        div()
+            .id(id)
+            .flex()
+            .flex_row()
+            .justify_center()
+            .flex_shrink_0()
+            .h_full()
+            .w(px(thickness + reach * 2.0))
+            .mx(px(-reach))
+            .cursor_col_resize()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _w, cx| {
+                    this.start_panel_resize(side, f32::from(event.position.x), cx)
+                }),
+            )
+            .child(
+                div()
+                    .h_full()
+                    .w(px(thickness))
+                    // Lit while dragged, so the edge being moved is the one
+                    // thing on screen that says so.
+                    .bg(if dragging { accent } else { rule }),
+            )
+            .into_any_element()
+    }
+
+    fn start_panel_resize(&mut self, side: PanelSide, x: f32, cx: &mut Context<Self>) {
+        let start_width = self.panel_width(side, cx);
+        self.resizing = Some(PanelResize {
+            side,
+            start_x: x,
+            start_width,
+        });
+        cx.notify();
+    }
+
+    /// Follow the pointer: the panel is as wide as it was at mouse-down
+    /// plus how far the pointer has travelled toward the window's centre.
+    /// The clamp happens at render, against this frame's window, so the
+    /// stored width is the asked-for one and a wider window gives it back.
+    fn drag_panel_edge(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some(resize) = self.resizing else {
+            return;
+        };
+        let travel = x - resize.start_x;
+        let width = match resize.side {
+            PanelSide::Left => resize.start_width + travel,
+            PanelSide::Right => resize.start_width - travel,
+        };
+        let default = cx.theme().space().dropdown_width();
+        let (floor, room) = self.panel_bounds(default);
+        // Stored already clamped, so a drag past the limit does not bank an
+        // invisible surplus that the next drag has to burn through.
+        let width = width.clamp(floor, room.max(floor)).round() as u32;
+        let slot = match resize.side {
+            PanelSide::Left => &mut self.config.sidebar_width,
+            PanelSide::Right => &mut self.config.detail_width,
+        };
+        if *slot != Some(width) {
+            *slot = Some(width);
+            cx.notify();
+        }
+    }
+
+    /// Let go: the width the panel landed on is the one the next session
+    /// opens with.
+    fn end_panel_resize(&mut self, cx: &mut Context<Self>) {
+        if self.resizing.take().is_none() {
+            return;
+        }
+        if let Err(err) = self.config.save(&self.config_path) {
+            self.notify_user(format!("could not save the panel width: {err}"), cx);
+        }
+        cx.notify();
+    }
+
     /// Below this the panels dock as overlays instead of taking space.
     ///
     /// Derived from the token scale rather than a magic number, so it tracks
@@ -4946,7 +5147,9 @@ impl Explorer {
     /// and should give up sooner.
     fn is_narrow(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let panel = cx.theme().space().dropdown_width();
-        // Two panels plus a listing at least as wide as one of them.
+        // Two panels plus a listing at least as wide as one of them. The
+        // same test, from the recorded width, decides in `panel_width`
+        // whether a panel has a docked neighbour to leave room for.
         window.viewport_size().width < px(panel * 3.0)
     }
 
@@ -5007,7 +5210,7 @@ impl Explorer {
     }
 
     fn sidebar_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let width = cx.theme().space().dropdown_width();
+        let width = self.panel_width(PanelSide::Left, cx);
         let focused = self.pane == Pane::Sidebar;
         let cursor = self.place_cursor;
         // Exact match, so browsing under Home does not leave Home lit the
@@ -5493,12 +5696,12 @@ impl Explorer {
         // Reduced from panel-padding: the info is a fact sheet, not a card.
         let pad = theme.space().row_padding_x();
         let pad_y = theme.space().md();
-        let (dim, caption, small_gap, width) = (
+        let (dim, caption, small_gap) = (
             theme.dim_foreground_on(surface),
             theme.type_scale().caption(),
             theme.space().sm(),
-            theme.space().dropdown_width(),
         );
+        let width = self.panel_width(PanelSide::Right, cx);
 
         // Three states, and they are genuinely different: nothing selected,
         // something selected whose read has not landed, and a preview.
@@ -5990,7 +6193,9 @@ impl Explorer {
                     );
                 }
                 Modal::new("copy-image", "Copy")
-                    .subtitle(format!("{name} \u{2014} as a file, or as a picture to paste"))
+                    .subtitle(format!(
+                        "{name} \u{2014} as a file, or as a picture to paste"
+                    ))
                     .child(div().flex().flex_col().children(separated(rows)))
                     .hint("\u{23ce}", "copy")
                     .hint("\u{2193}\u{2191}", "select")
