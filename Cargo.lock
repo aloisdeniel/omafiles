@@ -4586,7 +4586,7 @@ dependencies = [
 
 [[package]]
 name = "omafiles"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -4608,7 +4608,7 @@ dependencies = [
 
 [[package]]
 name = "omarchy-tokens"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "notify 8.2.0",
@@ -4618,7 +4618,7 @@ dependencies = [
 
 [[package]]
 name = "omarchy-ui"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "futures",

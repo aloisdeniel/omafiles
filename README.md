@@ -45,8 +45,8 @@ Prebuilt for Omarchy (Arch Linux, x86_64). Grab the package from the
 [latest release](https://github.com/aloisdeniel/omafiles/releases/latest):
 
 ```sh
-curl -LO https://github.com/aloisdeniel/omafiles/releases/latest/download/omafiles-0.0.3-1-x86_64.pkg.tar.zst
-sudo pacman -U omafiles-0.0.3-1-x86_64.pkg.tar.zst
+curl -LO https://github.com/aloisdeniel/omafiles/releases/latest/download/omafiles-0.0.4-1-x86_64.pkg.tar.zst
+sudo pacman -U omafiles-0.0.4-1-x86_64.pkg.tar.zst
 ```
 
 pacman installs the runtime dependencies (`git`, `ffmpeg`, `xdg-utils`),
