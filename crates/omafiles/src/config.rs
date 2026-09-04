@@ -15,6 +15,12 @@ pub struct Config {
     /// spell out their verb beside the glyph. Off by default: a bar of
     /// glyphs reads as chrome, and the verb is one hover away.
     pub button_labels: bool,
+    /// The sidebar's width in logical pixels, as last dragged. Absent until
+    /// the user resizes it; the theme's `dropdown-width` stands in until
+    /// then, so a fresh install still follows the token scale.
+    pub sidebar_width: Option<u32>,
+    /// The detail panel's width, on the same terms.
+    pub detail_width: Option<u32>,
 }
 
 impl Config {
@@ -73,6 +79,8 @@ mod tests {
         let path = scratch("roundtrip");
         let config = Config {
             button_labels: true,
+            sidebar_width: Some(320),
+            detail_width: None,
         };
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path), config);
@@ -83,5 +91,23 @@ mod tests {
         let path = scratch("broken");
         std::fs::write(&path, "button_labels = maybe").unwrap();
         assert_eq!(Config::load(&path), Config::default());
+    }
+
+    #[test]
+    fn a_file_without_widths_leaves_them_unset() {
+        let path = scratch("nowidths");
+        std::fs::write(&path, "button_labels = true").unwrap();
+        let config = Config::load(&path);
+        assert!(config.button_labels);
+        assert_eq!(config.sidebar_width, None);
+        assert_eq!(config.detail_width, None);
+    }
+
+    #[test]
+    fn unset_widths_are_not_written() {
+        let path = scratch("unset");
+        Config::default().save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("width"), "{text}");
     }
 }

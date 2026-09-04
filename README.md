@@ -73,6 +73,7 @@ All files live under `~/.config/omafiles/` and are optional.
 | `config.toml` | The few settings that are not keys, e.g. `button_labels = true` to spell out the verbs on the action buttons. |
 | `places.toml` | The pinned directories in the sidebar. Written by the app when you pin. |
 | `network.toml` | Saved network locations. |
+| `views.toml` | Per-directory listing layout: the sort column and direction, and the column widths, written when you click a header or drag a divider. |
 
 ## Development
 

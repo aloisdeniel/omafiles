@@ -1875,6 +1875,21 @@ exercised against a live server here (none reachable); the mount-point resolutio
 the list machinery are headless-tested, and the row is mouse-only for now like Recent's
 was.
 
+**Three bars, one per panel** (2026-09-04, on request): the navigation bar stopped
+spanning the listing and the detail panel together. The listing keeps back, up and the
+path; the detail panel got a bar of its own holding the entry's verbs, which left the
+foot of the fact sheet — so the sheet now reads cover, then facts, and the verbs sit at
+the top where the bar rules align across all three panels. As many verbs as fit show
+from the left, estimated from the monospace metrics before layout (`leading_that_fit`),
+and a borderless `…` at the right edge opens the rest as a positioned menu
+(`Overlay::DetailMenu`) drawing from the same list (`detail_actions`), so the bar and
+the menu cannot disagree. The order is therefore a decision: preview, open, copy path,
+copy, share first, then the verbs that change something (agent, cut, move, zip, delete,
+pin). Preview stays present but disabled where nothing expands, so the verbs keep their
+places. The expanded preview's instruction strip became that pane's bar too, at the
+shared height and replacing the navigation bar: back where back always is, then the
+name and the keys, with the body filling everything below.
+
 **The detail panel became a cover sheet** (2026-09-02, on request): the preview body
 rides on top, flush to the panel edges like a cover, a rule between it and the facts;
 the info below dropped from panel-padding to row-padding; and the expand control became

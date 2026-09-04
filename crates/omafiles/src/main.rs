@@ -44,7 +44,7 @@ use omafiles::git;
 use omafiles::grep;
 use omafiles::imageops;
 use omafiles::keymap;
-use omafiles::listing::{Listing, describe_empty, is_navigable};
+use omafiles::listing::{Listing, SortKey, describe_empty, is_navigable};
 use omafiles::network;
 use omafiles::places::{Origin, Place, Places};
 use omafiles::preview::{self, Body, Preview, Target};
@@ -52,6 +52,7 @@ use omafiles::recent;
 use omafiles::search::{Match, Search, walk};
 use omafiles::server;
 use omafiles::session::{Session, Tab};
+use omafiles::views::{DirectoryView, Views};
 use omarchy_ui::{
     ActionButton, ActiveTheme as _, Badge, Breadcrumb, Modal, ModalSize, Row, SectionHeader,
     Separator, SyntaxPalette, Theme,
@@ -915,6 +916,13 @@ enum Overlay {
         /// keyboard route) centres it like any other modal.
         position: Option<Point<Pixels>>,
     },
+    /// The `\u{2026}` at the right edge of the detail bar: the entry's verbs
+    /// the bar was too narrow to show, in the order they would have had.
+    DetailMenu {
+        /// How many the bar did show, so the menu starts where it stopped.
+        shown: usize,
+        position: Option<Point<Pixels>>,
+    },
     /// The HTTP server's contextual menu (§6.7), scoped to one root — the
     /// current directory from `^s` and the badge, any server's from the
     /// globe list's logs button.
@@ -1206,6 +1214,65 @@ enum Pane {
     Listing,
 }
 
+/// The two side panels, as the things that can be resized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelSide {
+    Left,
+    Right,
+}
+
+/// A panel edge being dragged: which one, where the pointer started, and
+/// how wide the panel was then. The width is applied to the config as the
+/// pointer moves and written to disk when the button comes up.
+#[derive(Debug, Clone, Copy)]
+struct PanelResize {
+    side: PanelSide,
+    start_x: f32,
+    start_width: f32,
+}
+
+/// The share of the window the centre column always keeps: however wide
+/// the panels are dragged, the listing stays at least this fraction. Below
+/// it the listing would be a sliver, and the panels are about the listing.
+const CENTER_MIN_FRACTION: f32 = 0.3;
+
+/// The two draggable boundaries in the listing header. Named by the column
+/// on their right, which is the one whose left edge they are: the name
+/// column takes whatever is left, so it has no width of its own to drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColumnDivider {
+    /// Between the name and the size column.
+    Size,
+    /// Between the size and the age column.
+    Age,
+}
+
+/// A column boundary being dragged: which one, where the pointer started,
+/// and how wide the two right-hand columns were then. Applied to the
+/// directory's view as the pointer moves and written to disk on mouse up,
+/// the same shape as [`PanelResize`].
+#[derive(Debug, Clone, Copy)]
+struct ColumnResize {
+    divider: ColumnDivider,
+    start_x: f32,
+    start_size: f32,
+    start_age: f32,
+}
+
+/// The narrowest a listing column can be dragged: room for a label and the
+/// glyph after it. Below that the column says nothing, and the values in it
+/// would be clipped to a digit.
+const COLUMN_MIN: f32 = 40.;
+
+/// The widest. Past this the size or age column is eating the name column,
+/// which is the one column a listing cannot do without.
+const COLUMN_MAX: f32 = 320.;
+
+/// The narrowest a panel goes, as a share of `dropdown-width`. Half the
+/// default keeps every row's icon and a few characters of its label; below
+/// that the panel says nothing, and collapsing it is the honest gesture.
+const PANEL_MIN_FACTOR: f32 = 0.5;
+
 /// What a Pin button can say about a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PinState {
@@ -1235,6 +1302,18 @@ fn pin_button(
         .compact(compact)
         .enabled(state != PinState::System)
         .on_click(cx.listener(move |this, _e, _w, cx| this.toggle_pin(&path, cx)))
+}
+
+/// One of the selected entry's verbs, as the detail bar and its overflow
+/// menu both see it: a glyph and a word for the button, a longer phrase
+/// for the menu row, and the action itself.
+struct DetailAction {
+    id: &'static str,
+    glyph: &'static str,
+    label: &'static str,
+    menu: &'static str,
+    enabled: bool,
+    act: ContextAction,
 }
 
 struct Explorer {
@@ -1276,6 +1355,15 @@ struct Explorer {
     /// window restores the panels rather than leaving them shut.
     left_open: bool,
     right_open: bool,
+    /// The panel edge under the pointer while it is being dragged.
+    resizing: Option<PanelResize>,
+    /// The listing column boundary under the pointer while it is dragged.
+    column_resizing: Option<ColumnResize>,
+    /// How each directory's listing is sorted and its columns sized.
+    views: Views,
+    /// The window's width as of the last frame, so the panel widths can be
+    /// clamped against it from code that only has the app context.
+    viewport_width: f32,
     /// Scroll state for the two panels, so their content can overflow.
     left_scroll: gpui::ScrollHandle,
     right_scroll: gpui::ScrollHandle,
@@ -1381,13 +1469,14 @@ impl Explorer {
         let config_dir = config_dir();
         let session_path = session_path();
         let session = Session::load(&session_path, start);
+        let views = Views::load(&config_dir);
 
         let mut listings = HashMap::new();
         let mut cursors = HashMap::new();
         // Seed the active tab synchronously so the first frame has content;
         // the rest load lazily when switched to.
         if let Some(tab) = session.active_tab() {
-            let listing = Listing::read(tab.path());
+            let listing = Listing::read_sorted(tab.path(), views.get(tab.path()).sort());
             if let Some(index) = tab
                 .cursor_name
                 .as_deref()
@@ -1421,6 +1510,10 @@ impl Explorer {
             overlay: None,
             left_open: true,
             right_open: true,
+            resizing: None,
+            column_resizing: None,
+            views,
+            viewport_width: 0.0,
             left_scroll: gpui::ScrollHandle::new(),
             right_scroll: gpui::ScrollHandle::new(),
             input: input.clone(),
@@ -1763,12 +1856,13 @@ impl Explorer {
             .remembered_cursor()
             .map(str::to_string)
             .or_else(|| tab.cursor_name.clone());
+        let sort = self.views.get(&path).sort();
 
         // Read off the main thread; the previous listing stays on screen until
         // the new one lands, so navigation never blanks the window.
         self._pending = Some(cx.spawn(async move |this, cx| {
             let listing = cx
-                .background_spawn(async move { Listing::read(&path) })
+                .background_spawn(async move { Listing::read_sorted(&path, sort) })
                 .await;
 
             let _ = this.update(cx, |this, cx| {
@@ -2921,7 +3015,10 @@ impl Explorer {
         self.clipboard = Some(entry.path);
         self.clipboard_cut = true;
         self.inform_user(
-            format!("cut \u{201c}{}\u{201d} \u{2014} paste to move it", entry.name),
+            format!(
+                "cut \u{201c}{}\u{201d} \u{2014} paste to move it",
+                entry.name
+            ),
             cx,
         );
     }
@@ -2935,7 +3032,10 @@ impl Explorer {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(
             entry.path.to_string_lossy().into_owned(),
         ));
-        self.inform_user(format!("copied the path of \u{201c}{}\u{201d}", entry.name), cx);
+        self.inform_user(
+            format!("copied the path of \u{201c}{}\u{201d}", entry.name),
+            cx,
+        );
     }
 
     /// The copy-image modal, with its conversions started.
@@ -3001,7 +3101,9 @@ impl Explorer {
                 let live = this
                     .update(cx, |this, cx| match &mut this.overlay {
                         Some(Overlay::CopyImage {
-                            path: open, encoded, ..
+                            path: open,
+                            encoded,
+                            ..
                         }) if *open == path => {
                             if let Some(slot) = encoded.get_mut(i) {
                                 *slot = Some(result);
@@ -3057,10 +3159,8 @@ impl Explorer {
                         .background_spawn(async move { imageops::copy_png_to_clipboard(&bytes) })
                         .await;
                     let _ = this.update(cx, |this, cx| match outcome {
-                        Ok(()) => this.inform_user(
-                            format!("copied \u{201c}{name}\u{201d} as PNG{size}"),
-                            cx,
-                        ),
+                        Ok(()) => this
+                            .inform_user(format!("copied \u{201c}{name}\u{201d} as PNG{size}"), cx),
                         Err(why) => this.notify_user(why, cx),
                     });
                 }));
@@ -3125,28 +3225,23 @@ impl Explorer {
                 }
                 gpui::ClipboardEntry::ExternalPaths(paths) => {
                     if let Some(source) = paths.paths().first().cloned() {
-                        self.land_file(
-                            cx,
-                            move || fileops::copy_into(&source, &dest),
-                            "pasted",
-                        );
+                        self.land_file(cx, move || fileops::copy_into(&source, &dest), "pasted");
                         return;
                     }
                 }
                 gpui::ClipboardEntry::String(text) => {
                     let candidate = PathBuf::from(expand_tilde(text.text().trim()));
                     if candidate.is_absolute() && candidate.exists() {
-                        self.land_file(
-                            cx,
-                            move || fileops::copy_into(&candidate, &dest),
-                            "pasted",
-                        );
+                        self.land_file(cx, move || fileops::copy_into(&candidate, &dest), "pasted");
                         return;
                     }
                 }
             }
         }
-        self.notify_user("nothing on the clipboard to paste as a file".to_string(), cx);
+        self.notify_user(
+            "nothing on the clipboard to paste as a file".to_string(),
+            cx,
+        );
     }
 
     /// Run a file-making operation in the background and put the cursor on
@@ -3207,12 +3302,13 @@ impl Explorer {
             self.clipboard_cut = false;
         }
         self._action_task = Some(cx.spawn(async move |this, cx| {
-            let outcome = cx.background_spawn(async move { fileops::trash(&path) }).await;
+            let outcome = cx
+                .background_spawn(async move { fileops::trash(&path) })
+                .await;
             let _ = this.update(cx, |this, cx| match outcome {
-                Ok(()) => this.inform_user(
-                    format!("moved \u{201c}{name}\u{201d} to the trash"),
-                    cx,
-                ),
+                Ok(()) => {
+                    this.inform_user(format!("moved \u{201c}{name}\u{201d} to the trash"), cx)
+                }
                 Err(message) => this.notify_user(message, cx),
             });
         }));
@@ -3264,6 +3360,23 @@ impl Explorer {
             is_dir: entry.kind.is_dir(),
             position,
         });
+        let owner = self.focus_handle_for(self.pane).clone();
+        window.focus(&owner, cx);
+        cx.notify();
+    }
+
+    /// The detail bar's `\u{2026}`: the verbs it had no room for.
+    fn open_detail_menu(
+        &mut self,
+        shown: usize,
+        position: Option<Point<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cursor().is_none() {
+            return;
+        }
+        self.overlay = Some(Overlay::DetailMenu { shown, position });
         let owner = self.focus_handle_for(self.pane).clone();
         window.focus(&owner, cx);
         cx.notify();
@@ -4318,7 +4431,8 @@ impl Explorer {
                             // when a file appears or disappears above it.
                             let keep = this.cursor_name();
                             let id = this.tab_id();
-                            let listing = Listing::read(&this.current_path());
+                            let path = this.current_path();
+                            let listing = Listing::read_sorted(&path, this.views.get(&path).sort());
                             this.listings.insert(id.clone(), listing);
                             this.prune_selection_of(&id);
                             let restored = this.restore_cursor(keep.as_deref()).or_else(|| {
@@ -4359,6 +4473,7 @@ impl Render for Explorer {
         if self.tab_drop.is_some() && !cx.has_active_drag() {
             self.tab_drop = None;
         }
+        self.viewport_width = f32::from(window.viewport_size().width);
         // One call site, at the top of the frame, rather than in each of the
         // dozen places the cursor can move. It is a key comparison when nothing
         // changed, and it cannot be forgotten the way a dozen calls can.
@@ -4635,6 +4750,37 @@ impl Render for Explorer {
                 this.left_open = !this.left_open;
                 cx.notify();
             }))
+            // A panel or column resize is tracked here, on the container
+            // that spans the window, so the drag keeps following the pointer
+            // once it has left the hairline it started on.
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                if this.resizing.is_none() && this.column_resizing.is_none() {
+                    return;
+                }
+                // The button came up somewhere the window did not see it.
+                if event.pressed_button != Some(gpui::MouseButton::Left) {
+                    this.end_panel_resize(cx);
+                    this.end_column_resize(cx);
+                    return;
+                }
+                let x = f32::from(event.position.x);
+                this.drag_panel_edge(x, cx);
+                this.drag_column_divider(x, cx);
+            }))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _e, _, cx| {
+                    this.end_panel_resize(cx);
+                    this.end_column_resize(cx);
+                }),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _e, _, cx| {
+                    this.end_panel_resize(cx);
+                    this.end_column_resize(cx);
+                }),
+            )
             .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| {
                 this.right_open = !this.right_open;
                 cx.notify();
@@ -4681,16 +4827,15 @@ impl Render for Explorer {
 }
 
 impl Explorer {
-    /// The height both top bars share, so the rule under each meets the
-    /// other's across the vertical divider.
+    /// The height the three top bars share — one over each panel — so the
+    /// rule under each meets the others' across the vertical dividers.
     fn bar_height(space: &omarchy_tokens::Spacing) -> f32 {
         space.control_height() + space.sm() * 2.0
     }
 
-    /// The navigation bar over the listing and the detail panel: back, up,
-    /// and the path — click to edit. When the sidebar is hidden the tools
-    /// that live in its own bar ride here instead, so the mouse can still
-    /// reach them.
+    /// The navigation bar over the listing: back, up, and the path — click
+    /// to edit. When the sidebar is hidden the tools that live in its own
+    /// bar ride here instead, so the mouse can still reach them.
     fn nav_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let space = theme.space();
@@ -4870,7 +5015,7 @@ impl Explorer {
 
     /// The sidebar with its bar on top, the shape it takes docked or floating.
     fn sidebar_column(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let width = cx.theme().space().dropdown_width();
+        let width = self.panel_width(PanelSide::Left, cx);
         div()
             .flex()
             .flex_col()
@@ -4901,33 +5046,47 @@ impl Explorer {
         // The sidebar, or the strip that expands it again; a narrow window
         // floats the panel over the listing, so the strip stays as the way in.
         let mut row = div().flex().flex_row().flex_1().min_h(px(0.));
-        let left = if !narrow && self.left_open {
-            self.sidebar_column(cx)
+        // The rule beside a docked panel is also its grip; the strip's rule
+        // is only a rule, since a collapsed panel has no width to drag.
+        let (left, rule) = if !narrow && self.left_open {
+            (
+                self.sidebar_column(cx),
+                self.resize_handle(PanelSide::Left, cx),
+            )
         } else {
-            self.sidebar_strip(cx)
+            (
+                self.sidebar_strip(cx),
+                Separator::vertical().into_any_element(),
+            )
         };
-        row = row.child(left).child(Separator::vertical());
+        row = row.child(left).child(rule);
 
-        // The listing and the detail panel share one navigation bar; the
-        // sidebar has its own (on request), so the top of the window splits
-        // where the panes do.
-        let mut content = div().flex().flex_row().flex_1().min_h(px(0.));
+        // Each panel carries its own bar (on request): the sidebar its
+        // tools, the listing the navigation, the detail panel the entry's
+        // verbs — so the top of the window splits where the panes do.
+        let mut content = div().flex().flex_row().flex_1().min_w(px(0.)).min_h(px(0.));
         // The expanded preview takes the listing column *and* the detail panel,
         // because the panel was showing the same preview beside it — the same
         // title, the same facts, the same picture, twice. It leaves the sidebar
         // alone, which is what still makes this a pane rather than a modal: you
-        // can change directory without collapsing it.
+        // can change directory without collapsing it. Its bar replaces the
+        // navigation bar too: the way back is the one control it needs.
         if self.preview_expanded() {
             content = content.child(self.expanded_pane(cx));
         } else {
-            content = content.child(self.listing_pane(cx));
+            content = content.child(self.listing_column(cx));
             if !narrow && self.right_open {
                 content = content
-                    .child(Separator::vertical())
-                    .child(self.detail_pane(cx));
+                    .child(self.resize_handle(PanelSide::Right, cx))
+                    .child(self.detail_column(cx));
             }
         }
-        let main = div()
+        row.child(content).into_any_element()
+    }
+
+    /// The listing with the navigation bar on top.
+    fn listing_column(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        div()
             .flex()
             .flex_col()
             .flex_1()
@@ -4935,8 +5094,606 @@ impl Explorer {
             .min_h(px(0.))
             .child(self.nav_bar(cx))
             .child(Separator::horizontal())
-            .child(content);
-        row.child(main).into_any_element()
+            .child(self.listing_pane(cx))
+            .into_any_element()
+    }
+
+    /// The detail panel with its bar on top, the shape it takes docked or
+    /// floating.
+    fn detail_column(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let width = self.panel_width(PanelSide::Right, cx);
+        div()
+            .flex()
+            .flex_col()
+            .w(px(width))
+            .flex_shrink_0()
+            .h_full()
+            .child(self.detail_bar(cx))
+            .child(Separator::horizontal())
+            .child(self.detail_pane(cx))
+            .into_any_element()
+    }
+
+    /// The selected entry's verbs, in one order for the bar and the menu
+    /// and the mouse's counterpart to `⏎`/`a`/`s`. The most reached-for
+    /// come first, because the bar shows them from the left and drops the
+    /// rest into its menu: preview, open, copy path, copy, share, then the
+    /// verbs that change something. The directory's own actions live in
+    /// the status bar with the directory's facts.
+    fn detail_actions(&self) -> Vec<DetailAction> {
+        let Some(entry) = self.cursor().and_then(|i| self.listing()?.get(i)).cloned() else {
+            return Vec::new();
+        };
+        // The expand affordance, on the states §6.5 says can overflow.
+        // Present but disabled elsewhere, so the verbs keep their places.
+        let expandable = self
+            .preview
+            .as_ref()
+            .is_some_and(|l| l.preview.body.is_expandable());
+        let verb = |id, glyph, label, menu, enabled, act| DetailAction {
+            id,
+            glyph,
+            label,
+            menu,
+            enabled,
+            act,
+        };
+        let mut actions = vec![
+            verb(
+                "detail-preview",
+                "\u{f06e}", // nf-fa-eye
+                "Preview",
+                "Preview",
+                expandable,
+                Box::new(
+                    |this: &mut Explorer, _w: &mut Window, cx: &mut Context<Explorer>| {
+                        this.toggle_preview(cx)
+                    },
+                ) as ContextAction,
+            ),
+            verb(
+                "detail-open",
+                "\u{f08e}", // nf-fa-external_link
+                "Open",
+                "Open",
+                true,
+                Box::new(|this, _w, cx| this.open_selected(cx)),
+            ),
+            verb(
+                "detail-path",
+                "\u{f0c1}", // nf-fa-link
+                "Path",
+                "Copy path",
+                true,
+                Box::new(|this, _w, cx| this.copy_path_selected(cx)),
+            ),
+            verb(
+                "detail-copy",
+                "\u{f0c5}", // nf-fa-copy
+                "Copy",
+                "Copy",
+                true,
+                Box::new(|this, window, cx| this.copy_selected(window, cx)),
+            ),
+            verb(
+                "detail-share",
+                "\u{f1e0}", // nf-fa-share_alt
+                "Share",
+                "Share via LocalSend",
+                true,
+                Box::new(|this, _w, cx| this.share_selected(cx)),
+            ),
+            verb(
+                "detail-agent",
+                "\u{f06a9}", // nf-md-robot
+                "Agent",
+                "Ask the agent",
+                true,
+                Box::new(|this, window, cx| this.ask_agent(window, cx)),
+            ),
+            verb(
+                "detail-cut",
+                "\u{f0c4}", // nf-fa-scissors
+                "Cut",
+                "Cut",
+                true,
+                Box::new(|this, _w, cx| this.cut_selected(cx)),
+            ),
+            verb(
+                "detail-move",
+                "\u{f061}", // nf-fa-arrow_right
+                "Move",
+                "Move to\u{2026}",
+                true,
+                Box::new(|this, window, cx| this.move_selected(window, cx)),
+            ),
+            verb(
+                "detail-zip",
+                "\u{f1c6}", // nf-fa-file_archive
+                "Zip",
+                "Compress to zip",
+                true,
+                Box::new(|this, _w, cx| this.compress_selected(cx)),
+            ),
+            verb(
+                "detail-delete",
+                "\u{f1f8}", // nf-fa-trash
+                "Delete",
+                "Move to trash",
+                true,
+                Box::new(|this, window, cx| this.delete_selected(window, cx)),
+            ),
+        ];
+        // Directories additionally pin — a file cannot live in the sidebar.
+        if entry.kind.is_dir() {
+            let state = self.pin_state(&entry.path);
+            let label = if state == PinState::Pinned {
+                "Unpin"
+            } else {
+                "Pin"
+            };
+            let target = entry.path;
+            actions.push(verb(
+                "detail-pin",
+                "\u{f08d}", // nf-fa-thumb_tack
+                label,
+                label,
+                state != PinState::System,
+                Box::new(move |this, _w, cx| this.toggle_pin(&target, cx)),
+            ));
+        }
+        actions
+    }
+
+    /// The bar over the detail panel: the entry's verbs, as many as fit
+    /// from the left, and a borderless `\u{2026}` at the right edge opening
+    /// the rest as a menu when they do not all fit (on request).
+    fn detail_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let space = theme.space();
+        let inset = space.sm();
+        let height = Self::bar_height(space);
+        let caption = theme.type_scale().caption();
+        let dim = theme.dim_foreground();
+        // Glyphs alone unless the setting asks for the words; the verb is
+        // then a hover away.
+        let compact = !self.config.button_labels;
+        // What `ActionButton` will lay out, estimated from the monospace
+        // metrics rather than measured: the bar has to decide what fits
+        // before anything is laid out. Rounded up rather than down — a verb
+        // sent to the menu a little early costs a click, a bar that
+        // overflows its panel costs the resize grip.
+        let square = space.control_height() - space.md();
+        let border = theme.border_width().max(1.0) * 2.0;
+        let button_width = |label: &str| {
+            if compact {
+                square
+            } else {
+                space.md() * 2.0
+                    + border
+                    + caption * 1.2
+                    + space.control_gap()
+                    + caption * 0.66 * label.chars().count() as f32
+            }
+        };
+        let more_width = caption * ICON_COLUMN;
+        let room = self.panel_width(PanelSide::Right, cx) - inset * 2.0;
+
+        let actions = self.detail_actions();
+        let widths: Vec<f32> = actions.iter().map(|a| button_width(a.label)).collect();
+        let shown = leading_that_fit(&widths, inset, room, more_width);
+
+        let mut bar = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_shrink_0()
+            .h(px(height))
+            .gap(px(inset))
+            .p(px(inset))
+            .overflow_hidden();
+        let hidden = shown < actions.len();
+        for action in actions.into_iter().take(shown) {
+            let act = action.act;
+            bar = bar.child(
+                ActionButton::new(action.id)
+                    .glyph(action.glyph)
+                    .label(action.label)
+                    .compact(compact)
+                    .enabled(action.enabled)
+                    .on_click(cx.listener(move |this, _e, window, cx| act(this, window, cx))),
+            );
+        }
+        if hidden {
+            // Borderless, at the far right: it is about the bar itself, not
+            // one of the verbs, so it must not read as one more of them.
+            let more = quiet_button(
+                "detail-more",
+                "\u{f141}", // nf-fa-ellipsis_h
+                dim,
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    this.open_detail_menu(shown, Some(event.position()), window, cx)
+                }),
+                cx,
+            );
+            bar = bar.child(div().flex_1()).child(more);
+        }
+        bar.into_any_element()
+    }
+
+    /// A panel's width for this frame: the one the user dragged it to, or
+    /// the theme's `dropdown-width` until they have, kept between the floor
+    /// and whatever the centre column can spare beside the other panel.
+    fn panel_width(&self, side: PanelSide, cx: &App) -> f32 {
+        let default = cx.theme().space().dropdown_width();
+        let (floor, room) = self.panel_bounds(default);
+        let simple = |asked: Option<u32>| {
+            asked
+                .map_or(default, |w| w as f32)
+                .clamp(floor, room.max(floor))
+        };
+        // The other panel, at its own simple clamp, is what this one has to
+        // fit beside. One-sided on purpose: two panels each clamped against
+        // the other's clamped width would chase in circles. A floating panel
+        // has no neighbour, and an expanded preview has hidden the right one.
+        let docked = self.viewport_width >= default * 3.0;
+        let other = match side {
+            PanelSide::Left if docked && self.right_open && !self.preview_expanded() => {
+                simple(self.config.detail_width)
+            }
+            PanelSide::Right if docked && self.left_open => simple(self.config.sidebar_width),
+            _ => 0.0,
+        };
+        let asked = match side {
+            PanelSide::Left => self.config.sidebar_width,
+            PanelSide::Right => self.config.detail_width,
+        };
+        asked
+            .map_or(default, |w| w as f32)
+            .clamp(floor, (room - other).max(floor))
+    }
+
+    /// The floor every panel keeps, and the width the two panels may share
+    /// in this window once the centre column has its minimum.
+    fn panel_bounds(&self, default: f32) -> (f32, f32) {
+        let floor = (default * PANEL_MIN_FACTOR).round();
+        let room = (self.viewport_width * (1.0 - CENTER_MIN_FRACTION)).round();
+        (floor, room)
+    }
+
+    /// The rule beside a docked panel, widened into a grip: the hairline
+    /// stays where it was and a few invisible pixels either side of it take
+    /// the pointer. Only drawn while the panel is open — collapsed, there is
+    /// nothing to resize, and the rule is a plain rule.
+    fn resize_handle(&mut self, side: PanelSide, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let thickness = theme.space().hairline();
+        // The grip's reach, either side of the rule. Negative margins keep
+        // it from moving the panes: the layout still sees one hairline.
+        let reach = theme.space().sm().max(4.0);
+        let rule = theme.border().opacity(0.2);
+        let dragging = self.resizing.is_some_and(|r| r.side == side);
+        let accent = theme.accent();
+        let id = match side {
+            PanelSide::Left => "resize-left",
+            PanelSide::Right => "resize-right",
+        };
+        div()
+            .id(id)
+            .flex()
+            .flex_row()
+            .justify_center()
+            .flex_shrink_0()
+            .h_full()
+            .w(px(thickness + reach * 2.0))
+            .mx(px(-reach))
+            .cursor_col_resize()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _w, cx| {
+                    this.start_panel_resize(side, f32::from(event.position.x), cx)
+                }),
+            )
+            .child(
+                div()
+                    .h_full()
+                    .w(px(thickness))
+                    // Lit while dragged, so the edge being moved is the one
+                    // thing on screen that says so.
+                    .bg(if dragging { accent } else { rule }),
+            )
+            .into_any_element()
+    }
+
+    fn start_panel_resize(&mut self, side: PanelSide, x: f32, cx: &mut Context<Self>) {
+        let start_width = self.panel_width(side, cx);
+        self.resizing = Some(PanelResize {
+            side,
+            start_x: x,
+            start_width,
+        });
+        cx.notify();
+    }
+
+    /// Follow the pointer: the panel is as wide as it was at mouse-down
+    /// plus how far the pointer has travelled toward the window's centre.
+    /// The clamp happens at render, against this frame's window, so the
+    /// stored width is the asked-for one and a wider window gives it back.
+    fn drag_panel_edge(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some(resize) = self.resizing else {
+            return;
+        };
+        let travel = x - resize.start_x;
+        let width = match resize.side {
+            PanelSide::Left => resize.start_width + travel,
+            PanelSide::Right => resize.start_width - travel,
+        };
+        let default = cx.theme().space().dropdown_width();
+        let (floor, room) = self.panel_bounds(default);
+        // Stored already clamped, so a drag past the limit does not bank an
+        // invisible surplus that the next drag has to burn through.
+        let width = width.clamp(floor, room.max(floor)).round() as u32;
+        let slot = match resize.side {
+            PanelSide::Left => &mut self.config.sidebar_width,
+            PanelSide::Right => &mut self.config.detail_width,
+        };
+        if *slot != Some(width) {
+            *slot = Some(width);
+            cx.notify();
+        }
+    }
+
+    /// Let go: the width the panel landed on is the one the next session
+    /// opens with.
+    fn end_panel_resize(&mut self, cx: &mut Context<Self>) {
+        if self.resizing.take().is_none() {
+            return;
+        }
+        if let Err(err) = self.config.save(&self.config_path) {
+            self.notify_user(format!("could not save the panel width: {err}"), cx);
+        }
+        cx.notify();
+    }
+
+    // ----------------------------------------------- the listing's columns
+
+    /// The size and age column widths for the directory on screen: what was
+    /// dragged for it, or the built-in widths until then.
+    fn column_widths(&self) -> (f32, f32) {
+        let view = self.views.get(&self.current_path());
+        let width = |asked: Option<u32>, default: f32| {
+            asked
+                .map_or(default, |w| w as f32)
+                .clamp(COLUMN_MIN, COLUMN_MAX)
+        };
+        (
+            width(view.size_width, SIZE_COLUMN),
+            width(view.age_width, AGE_COLUMN),
+        )
+    }
+
+    /// Record how the directory on screen is laid out, apply its sort to
+    /// every tab looking at it, and keep the cursor's row in sight.
+    fn update_view(&mut self, view: DirectoryView, cx: &mut Context<Self>) {
+        let path = self.current_path();
+        let sort = view.sort();
+        self.views.set(&path, view);
+        for listing in self.listings.values_mut() {
+            if listing.path == path && listing.sort_order() != sort {
+                listing.sort(sort);
+            }
+        }
+        self.scroll_to_cursor();
+        cx.notify();
+    }
+
+    /// The layout the user reached is the one the directory opens with next
+    /// time, in every tab and every session.
+    fn save_views(&mut self, cx: &mut Context<Self>) {
+        if let Err(err) = self.views.save(&self.config_dir) {
+            self.notify_user(format!("could not save the listing layout: {err}"), cx);
+        }
+    }
+
+    /// A click on a column label: sort by it, or turn the sort around if it
+    /// already is. The cursor stays on its entry and follows it to its new
+    /// row — sorting is about the rows, not about what is selected.
+    fn click_column(&mut self, key: SortKey, cx: &mut Context<Self>) {
+        let mut view = self.views.get(&self.current_path());
+        view.set_sort(view.sort().clicked(key));
+        self.update_view(view, cx);
+        self.save_views(cx);
+    }
+
+    fn start_column_resize(&mut self, divider: ColumnDivider, x: f32, cx: &mut Context<Self>) {
+        let (start_size, start_age) = self.column_widths();
+        self.column_resizing = Some(ColumnResize {
+            divider,
+            start_x: x,
+            start_size,
+            start_age,
+        });
+        cx.notify();
+    }
+
+    /// Follow the pointer: the boundary moves with it, so the column on its
+    /// left grows by what the one on its right gives up. The name column
+    /// takes whatever is left, so its boundary only has the size column to
+    /// trade with; the other boundary trades size for age.
+    fn drag_column_divider(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some(resize) = self.column_resizing else {
+            return;
+        };
+        let travel = x - resize.start_x;
+        let (size, age) = match resize.divider {
+            ColumnDivider::Size => (resize.start_size - travel, resize.start_age),
+            ColumnDivider::Age => {
+                // Clamp the pair together, so that when one column hits its
+                // floor the other stops too and the boundary stays under the
+                // pointer rather than the columns sliding as a block.
+                let age = (resize.start_age - travel).clamp(COLUMN_MIN, COLUMN_MAX);
+                let size =
+                    (resize.start_size + resize.start_age - age).clamp(COLUMN_MIN, COLUMN_MAX);
+                (size, resize.start_size + resize.start_age - size)
+            }
+        };
+        // Stored already clamped, so a drag past the limit does not bank an
+        // invisible surplus that the next drag has to burn through.
+        let size = size.clamp(COLUMN_MIN, COLUMN_MAX).round() as u32;
+        let age = age.clamp(COLUMN_MIN, COLUMN_MAX).round() as u32;
+        let mut view = self.views.get(&self.current_path());
+        if view.size_width != Some(size) || view.age_width != Some(age) {
+            view.size_width = Some(size);
+            view.age_width = Some(age);
+            self.update_view(view, cx);
+        }
+    }
+
+    /// Let go: the widths the columns landed on are written down.
+    fn end_column_resize(&mut self, cx: &mut Context<Self>) {
+        if self.column_resizing.take().is_none() {
+            return;
+        }
+        self.save_views(cx);
+        cx.notify();
+    }
+
+    /// The column labels above the listing.
+    ///
+    /// Built from a plain `div` rather than a [`Row`]: this one is never the
+    /// cursor and never marked, and giving it a row's interaction vocabulary
+    /// would only invite it to light up as one. It borrows the row's metrics —
+    /// height, padding, gap, column widths — so the labels line up with the
+    /// values. Each label is a button that sorts by its column, and the rule
+    /// before the size and age labels is a grip that resizes them.
+    fn listing_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let space = theme.space();
+        let caption = theme.type_scale().caption();
+        let dim = theme.dim_foreground();
+        let fg = theme.foreground();
+        let gap = space.control_gap();
+        let (height, padding) = (space.control_height(), space.row_padding_x());
+        let sort = self.views.get(&self.current_path()).sort();
+        let (size_width, age_width) = self.column_widths();
+
+        // Uppercase caption in secondary text — the same treatment
+        // `SectionHeader` gives the sidebar's group labels, because this is
+        // the same kind of thing. The sorted column carries a caret after its
+        // name, pointing the way its values run down the list.
+        let label = |key: SortKey, text: &'static str, cx: &mut Context<Self>| {
+            let caret = (sort.key == key).then_some(if sort.descending {
+                "\u{f0d7}" // nf-fa-caret_down
+            } else {
+                "\u{f0d8}" // nf-fa-caret_up
+            });
+            div()
+                .id(("sort-by", key as usize))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(gap * 0.5))
+                .min_w(px(0.))
+                .cursor_pointer()
+                .text_color(if sort.key == key { fg } else { dim })
+                .hover(|style| style.text_color(fg))
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.click_column(key, cx);
+                }))
+                .child(div().truncate().child(text))
+                .children(caret)
+        };
+        let name = label(SortKey::Name, "NAME", cx);
+        let size = label(SortKey::Size, "SIZE", cx);
+        let age = label(SortKey::Age, "AGE", cx);
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(gap))
+            .w_full()
+            .h(px(height))
+            .px(px(padding))
+            .text_size(px(caption))
+            .text_color(dim)
+            // The icon column has no label — a glyph needs none — but it
+            // still has to be reserved, or every label sits one column to
+            // the left.
+            .child(div().w(px(caption * ICON_COLUMN)).flex_shrink_0())
+            .child(div().flex_1().min_w(px(0.)).child(name))
+            .child(
+                div()
+                    .relative()
+                    .w(px(size_width))
+                    .flex_shrink_0()
+                    .child(size)
+                    .child(self.column_grip(ColumnDivider::Size, gap, cx)),
+            )
+            .child(
+                div()
+                    .relative()
+                    .w(px(age_width))
+                    .flex_shrink_0()
+                    .child(age)
+                    .child(self.column_grip(ColumnDivider::Age, gap, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// The rule at a header column's left edge, widened into a grip the way
+    /// the panel rules are: a faint hairline in the middle of the gap before
+    /// the column, and a few invisible pixels either side that take the
+    /// pointer. Absolutely placed, so it costs the header no width and the
+    /// labels stay over the values.
+    fn column_grip(
+        &mut self,
+        divider: ColumnDivider,
+        gap: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let thickness = theme.space().hairline();
+        let reach = theme.space().sm().max(4.0);
+        let rule = theme.border().opacity(0.2);
+        let lit = theme.border();
+        let accent = theme.accent();
+        let dragging = self.column_resizing.is_some_and(|r| r.divider == divider);
+        let (id, group) = match divider {
+            ColumnDivider::Size => ("column-grip-size", "column-grip-size"),
+            ColumnDivider::Age => ("column-grip-age", "column-grip-age"),
+        };
+        div()
+            .id(id)
+            .group(group)
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(-(gap + thickness) / 2.0 - reach))
+            .w(px(thickness + reach * 2.0))
+            .flex()
+            .flex_row()
+            .justify_center()
+            .cursor_col_resize()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _w, cx| {
+                    this.start_column_resize(divider, f32::from(event.position.x), cx)
+                }),
+            )
+            .child(
+                div()
+                    .h_full()
+                    .w(px(thickness))
+                    // Lit while dragged, so the edge being moved is the one
+                    // thing on screen that says so; brighter under the
+                    // pointer, so the grip announces itself before the drag.
+                    .bg(if dragging { accent } else { rule })
+                    .group_hover(group, move |style| {
+                        style.bg(if dragging { accent } else { lit })
+                    }),
+            )
+            .into_any_element()
     }
 
     /// Below this the panels dock as overlays instead of taking space.
@@ -4946,7 +5703,9 @@ impl Explorer {
     /// and should give up sooner.
     fn is_narrow(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let panel = cx.theme().space().dropdown_width();
-        // Two panels plus a listing at least as wide as one of them.
+        // Two panels plus a listing at least as wide as one of them. The
+        // same test, from the recorded width, decides in `panel_width`
+        // whether a panel has a docked neighbour to leave room for.
         window.viewport_size().width < px(panel * 3.0)
     }
 
@@ -4970,7 +5729,7 @@ impl Explorer {
             let inner = if left {
                 self.sidebar_column(cx)
             } else {
-                self.detail_pane(cx)
+                self.detail_column(cx)
             };
             let mut panel = div().flex().flex_row().h_full().bg(background);
             panel = if left {
@@ -5007,7 +5766,7 @@ impl Explorer {
     }
 
     fn sidebar_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let width = cx.theme().space().dropdown_width();
+        let width = self.panel_width(PanelSide::Left, cx);
         let focused = self.pane == Pane::Sidebar;
         let cursor = self.place_cursor;
         // Exact match, so browsing under Home does not leave Home lit the
@@ -5343,6 +6102,7 @@ impl Explorer {
                         })
                         .collect(),
                 );
+                let columns = this.column_widths();
                 let Some(listing) = this.listings.get(&this.tab_id()) else {
                     return Vec::new();
                 };
@@ -5391,6 +6151,7 @@ impl Explorer {
                             cursor == Some(index),
                             is_selected,
                             state,
+                            columns,
                             cx,
                         )
                         .draggable(
@@ -5463,7 +6224,7 @@ impl Explorer {
             // The header sits outside the scrolling area, so it stays put while
             // the listing moves under it and the scrollbar does not run across
             // it.
-            .child(listing_header(cx))
+            .child(self.listing_header(cx))
             .child(Separator::horizontal())
             .child(
                 div()
@@ -5493,12 +6254,11 @@ impl Explorer {
         // Reduced from panel-padding: the info is a fact sheet, not a card.
         let pad = theme.space().row_padding_x();
         let pad_y = theme.space().md();
-        let (dim, caption, small_gap, width) = (
+        let (dim, caption) = (
             theme.dim_foreground_on(surface),
             theme.type_scale().caption(),
-            theme.space().sm(),
-            theme.space().dropdown_width(),
         );
+        let width = self.panel_width(PanelSide::Right, cx);
 
         // Three states, and they are genuinely different: nothing selected,
         // something selected whose read has not landed, and a preview.
@@ -5514,129 +6274,6 @@ impl Explorer {
                 .into_any_element(),
             (Some(loaded), _) => render_info(loaded, cx),
         };
-
-        // The expand affordance, on the states §6.5 says can overflow.
-        let expandable = self
-            .preview
-            .as_ref()
-            .is_some_and(|l| l.preview.body.is_expandable());
-
-        // The selected entry's actions, for the mouse (M9): the same verbs as
-        // `⏎`/`a`/`s`, beside the facts they act on. The directory's own
-        // actions live in the status bar with the directory's facts.
-        let entry = self.cursor().and_then(|i| self.listing()?.get(i)).cloned();
-        let selected = entry.is_some();
-        // Glyphs alone unless the setting asks for the words; the verb is
-        // then a hover away.
-        let compact = !self.config.button_labels;
-        let mut actions: Vec<ActionButton> = Vec::new();
-        if selected {
-            actions.push(
-                ActionButton::new("detail-open")
-                    .glyph("\u{f08e}") // nf-fa-external_link
-                    .label("Open")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, _w, cx| this.open_selected(cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-agent")
-                    .glyph("\u{f06a9}") // nf-md-robot
-                    .label("Agent")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, window, cx| this.ask_agent(window, cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-share")
-                    .glyph("\u{f1e0}") // nf-fa-share_alt
-                    .label("Share")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, _w, cx| this.share_selected(cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-copy")
-                    .glyph("\u{f0c5}") // nf-fa-copy
-                    .label("Copy")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, window, cx| this.copy_selected(window, cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-cut")
-                    .glyph("\u{f0c4}") // nf-fa-scissors
-                    .label("Cut")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, _w, cx| this.cut_selected(cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-path")
-                    .glyph("\u{f0c1}") // nf-fa-link
-                    .label("Path")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, _w, cx| this.copy_path_selected(cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-move")
-                    .glyph("\u{f061}") // nf-fa-arrow_right
-                    .label("Move")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, window, cx| this.move_selected(window, cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-zip")
-                    .glyph("\u{f1c6}") // nf-fa-file_archive
-                    .label("Zip")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, _w, cx| this.compress_selected(cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-delete")
-                    .glyph("\u{f1f8}") // nf-fa-trash
-                    .label("Delete")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, window, cx| this.delete_selected(window, cx))),
-            );
-        }
-        // Directories additionally pin — a file cannot live in the sidebar.
-        if let Some(entry) = entry.as_ref().filter(|e| e.kind.is_dir()) {
-            let state = self.pin_state(&entry.path);
-            actions.push(pin_button(
-                "detail-pin",
-                entry.path.clone(),
-                state,
-                compact,
-                cx,
-            ));
-        }
-        // The expand affordance rides with the other verbs (on request).
-        if expandable {
-            actions.push(
-                ActionButton::new("preview-fullscreen")
-                    .glyph("\u{f06e}") // nf-fa-eye
-                    .label("Preview")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, _w, cx| this.toggle_preview(cx))),
-            );
-        }
-
-        // One wrapping row of verbs; too narrow for a line, it wraps tidily.
-        // Below the facts, behind its own rule (on request): the sheet reads
-        // top to bottom — cover, facts, then what can be done about them.
-        let toolbar = (selected || expandable).then(|| {
-            div()
-                .flex()
-                .flex_col()
-                .child(Separator::horizontal())
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .flex_wrap()
-                        .gap(px(small_gap))
-                        .px(px(pad))
-                        .py(px(pad_y))
-                        .children(actions),
-                )
-        });
 
         // The preview rides on top, flush to the panel edges like a cover,
         // with a rule between it and the fact sheet below (on request).
@@ -5664,38 +6301,31 @@ impl Explorer {
                     .into_any_element()
             });
 
+        // The verbs are in the bar above (on request); the sheet reads
+        // cover, then facts. Sized by the column it sits in.
         div()
-            .w(px(width))
-            .flex_shrink_0()
-            .h_full()
-            .child(
+            .id("detail-scroll")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .track_scroll(&self.right_scroll)
+            .children(cover.is_some().then(|| {
                 div()
-                    .id("detail-scroll")
                     .flex()
                     .flex_col()
-                    .h_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.right_scroll)
-                    .children(cover.is_some().then(|| {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .children(cover)
-                            .child(Separator::horizontal())
-                            .into_any_element()
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .px(px(pad))
-                            .py(px(pad_y))
-                            .child(content),
-                    )
-                    // In the flow rather than floating over the facts: an
-                    // absolutely-positioned control inside a scroll container
-                    // scrolls away with the content.
-                    .children(toolbar),
+                    .children(cover)
+                    .child(Separator::horizontal())
+                    .into_any_element()
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .px(px(pad))
+                    .py(px(pad_y))
+                    .child(content),
             )
             .into_any_element()
     }
@@ -5990,7 +6620,9 @@ impl Explorer {
                     );
                 }
                 Modal::new("copy-image", "Copy")
-                    .subtitle(format!("{name} \u{2014} as a file, or as a picture to paste"))
+                    .subtitle(format!(
+                        "{name} \u{2014} as a file, or as a picture to paste"
+                    ))
                     .child(div().flex().flex_col().children(separated(rows)))
                     .hint("\u{23ce}", "copy")
                     .hint("\u{2193}\u{2191}", "select")
@@ -6725,6 +7357,49 @@ impl Explorer {
 
                 menu_surround(name.clone(), rows, position, viewport, dismiss, cx)
             }
+            Overlay::DetailMenu { shown, position } => {
+                let (shown, position) = (*shown, *position);
+                let name = self
+                    .cursor()
+                    .and_then(|i| self.listing()?.get(i))
+                    .map(|e| e.name.clone())?;
+                let theme = cx.theme();
+                let (dim, faded, icon_w) = (
+                    theme.dim_foreground(),
+                    theme.dim_foreground().opacity(0.5),
+                    theme.type_scale().caption() * 1.6,
+                );
+
+                // The same list the bar drew from, starting where it
+                // stopped. Each dismisses first: the action may open its own
+                // modal, and it must not find this one standing.
+                let rows: Vec<AnyElement> = self
+                    .detail_actions()
+                    .into_iter()
+                    .skip(shown)
+                    .map(|action| {
+                        let mut row = Row::new(action.id)
+                            .child(
+                                div()
+                                    .w(px(icon_w))
+                                    .flex_shrink_0()
+                                    .text_color(if action.enabled { dim } else { faded })
+                                    .child(action.glyph),
+                            )
+                            .child(div().flex_1().child(action.menu));
+                        if action.enabled {
+                            let act = action.act;
+                            row = row.on_click(cx.listener(move |this, _e, window, cx| {
+                                this.dismiss_overlay(window, cx);
+                                act(this, window, cx);
+                            }));
+                        }
+                        row.into_any_element()
+                    })
+                    .collect();
+
+                menu_surround(name, rows, position, viewport, dismiss, cx)
+            }
             Overlay::Server { root: menu_root } => {
                 let menu_root = menu_root.clone();
                 let theme = cx.theme();
@@ -6989,11 +7664,12 @@ impl Explorer {
     /// for.
     fn expanded_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (caption, dim, small_gap, gap) = (
+        let (caption, dim, inset, gap, height) = (
             theme.type_scale().caption(),
             theme.dim_foreground(),
             theme.space().sm(),
             theme.space().xl(),
+            Self::bar_height(theme.space()),
         );
         // Text-like bodies sit on the sunken ground, and the *pane* paints it
         // so it reaches the bottom edge even when the file does not. On the
@@ -7023,7 +7699,7 @@ impl Explorer {
                 .into_any_element(),
         };
 
-        // The one fact that survives, and it goes in the footer rather than over
+        // The one fact that survives, and it goes in the bar rather than over
         // the body: with the title gone and the listing replaced, nothing on
         // screen would say which file `j`/`k` had landed on.
         let name = self
@@ -7040,35 +7716,52 @@ impl Explorer {
             .min_w(px(0.))
             .min_h(px(0.))
             .child(
-                // The instruction bar rides on top (on request): the file's
-                // name, the keys, and the way back — then the rule, then the
-                // body filling everything below.
+                // This pane's own bar, standing in for the navigation bar
+                // (on request): the way back where back always is, then the
+                // file's name and the keys — then the rule, then the body
+                // filling everything below.
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .justify_between()
-                    .gap(px(gap))
-                    .p(px(small_gap))
-                    .text_size(px(caption))
-                    .text_color(dim)
-                    // The name yields first: a long one must not push the way
-                    // out off the edge of the window.
-                    .child(div().flex_1().min_w(px(0.)).overflow_hidden().child(name))
-                    .child("j / k  next \u{00b7} previous")
-                    // From the keymap, not a literal: rebinding space (M11)
-                    // must not leave this hint promising a key that no longer
-                    // does it.
-                    .child({
-                        let mut keys = vec!["esc".to_string()];
-                        keys.extend(self.keymap.keys_for("toggle_preview"));
-                        format!("{}  collapse", keys.join(" / "))
-                    })
+                    .flex_shrink_0()
+                    .h(px(height))
+                    .gap(px(inset))
+                    .p(px(inset))
                     .child(
-                        ActionButton::new("preview-close")
-                            .glyph("\u{f00d}") // nf-fa-times
-                            .label("Close")
+                        ActionButton::new("preview-back")
+                            .glyph("\u{f060}") // nf-fa-arrow_left
+                            .label("Back")
+                            .compact(true)
                             .on_click(cx.listener(|this, _e, _w, cx| this.toggle_preview(cx))),
+                    )
+                    // The name yields first: a long one must not push the
+                    // keys off the edge of the window.
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .text_size(px(caption))
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_shrink_0()
+                            .gap(px(gap))
+                            .text_size(px(caption))
+                            .text_color(dim)
+                            .child("j / k  next \u{00b7} previous")
+                            // From the keymap, not a literal: rebinding space
+                            // (M11) must not leave this hint promising a key
+                            // that no longer does it.
+                            .child({
+                                let mut keys = vec!["esc".to_string()];
+                                keys.extend(self.keymap.keys_for("toggle_preview"));
+                                format!("{}  back", keys.join(" / "))
+                            }),
                     ),
             )
             .child(Separator::horizontal())
@@ -7493,6 +8186,31 @@ fn drop_header(
 /// A borderless glyph button for a sidebar header — like a tab row's `×`,
 /// not an `ActionButton`: in a header a hairline outline reads as a form
 /// control.
+/// How many of a row of widths, `gap` apart, fit in `room`: all of them
+/// when they all do, else the leading ones that fit beside a `tail` (the
+/// bar's menu button) which then stands for the rest.
+fn leading_that_fit(widths: &[f32], gap: f32, room: f32, tail: f32) -> usize {
+    let total = widths.iter().sum::<f32>() + gap * widths.len().saturating_sub(1) as f32;
+    if total <= room {
+        return widths.len();
+    }
+    let mut used = 0.0;
+    let mut count = 0;
+    for width in widths {
+        let need = if count == 0 {
+            *width
+        } else {
+            used + gap + width
+        };
+        if need + gap + tail > room {
+            break;
+        }
+        used = need;
+        count += 1;
+    }
+    count
+}
+
 fn quiet_button(
     id: impl Into<gpui::ElementId>,
     glyph: &'static str,
@@ -7728,11 +8446,13 @@ impl Render for DragPreview {
     }
 }
 
-/// Width of the listing's size column.
+/// Width of the listing's size column until the user drags it; a dragged
+/// width is kept per directory in `views.toml`.
 ///
-/// Shared with [`listing_header`] rather than written at both call sites: the
-/// two have to agree to the pixel or the labels stop sitting over the values
-/// they name, and that is the kind of drift nobody sees in a diff.
+/// Read through `Explorer::column_widths` by both the header and the rows
+/// rather than written at two call sites: the two have to agree to the pixel
+/// or the labels stop sitting over the values they name, and that is the
+/// kind of drift nobody sees in a diff.
 const SIZE_COLUMN: f32 = 72.;
 
 /// Width of the listing's age column. See [`SIZE_COLUMN`].
@@ -7742,55 +8462,24 @@ const AGE_COLUMN: f32 = 48.;
 /// `omarchy display text size` like everything else.
 const ICON_COLUMN: f32 = 1.6;
 
-/// The column labels above the listing.
-///
-/// Built from a plain `div` rather than a [`Row`]: this one is never hovered,
-/// never the cursor, and never clicked, and giving it a row's interaction
-/// vocabulary would only invite it to light up. It borrows the row's metrics —
-/// height, padding, gap, column widths — so the labels line up with the values.
-fn listing_header(cx: &mut App) -> AnyElement {
-    let theme = cx.theme();
-    let space = theme.space();
-    let caption = theme.type_scale().caption();
-    let dim = theme.dim_foreground();
-
-    // Uppercase caption in secondary text — the same treatment `SectionHeader`
-    // gives the sidebar's group labels, because this is the same kind of thing.
-    let column = |label: &'static str, width: f32| div().w(px(width)).flex_shrink_0().child(label);
-
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(space.control_gap()))
-        .w_full()
-        .h(px(space.control_height()))
-        .px(px(space.row_padding_x()))
-        .text_size(px(caption))
-        .text_color(dim)
-        // The icon column has no label — a glyph needs none — but it still has
-        // to be reserved, or every label sits one column to the left.
-        .child(div().w(px(caption * ICON_COLUMN)).flex_shrink_0())
-        .child(div().flex_1().min_w(px(0.)).child("NAME"))
-        .child(column("SIZE", SIZE_COLUMN))
-        .child(column("AGE", AGE_COLUMN))
-        .into_any_element()
-}
-
 /// One listing row.
 ///
 /// `git` is what the repository says about this entry, if the status has landed
 /// and it has anything to say. It rides on the icon rather than taking a column
 /// of its own: a marker column would cost width in every directory, and most
 /// directories are not in a repository at all.
+///
+/// `columns` is the `(size, age)` width pair the header was drawn with.
 fn entry_row(
     position: usize,
     entry: &Entry,
     is_cursor: bool,
     is_selected: bool,
     git: Option<git::State>,
+    columns: (f32, f32),
     cx: &mut App,
 ) -> Row {
+    let (size_width, age_width) = columns;
     let theme = cx.theme();
     let caption = theme.type_scale().caption();
     let dim = theme.dim_foreground();
@@ -7864,16 +8553,18 @@ fn entry_row(
         }))
         .child(
             div()
-                .w(px(SIZE_COLUMN))
+                .w(px(size_width))
                 .flex_shrink_0()
+                .truncate()
                 .text_size(px(caption))
                 .text_color(dim)
                 .child(size),
         )
         .child(
             div()
-                .w(px(AGE_COLUMN))
+                .w(px(age_width))
                 .flex_shrink_0()
+                .truncate()
                 .text_size(px(caption))
                 .text_color(dim)
                 .child(age),
@@ -8502,6 +9193,28 @@ mod chrome_tests {
         assert_eq!(reasons.len(), 1);
         assert!(reasons[0].contains("not a directory"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_verb_fits_when_the_bar_is_wide_enough() {
+        // Three of 20 and two gaps of 4: 68 exactly.
+        assert_eq!(leading_that_fit(&[20., 20., 20.], 4., 68., 16.), 3);
+    }
+
+    #[test]
+    fn a_narrow_bar_keeps_the_leading_verbs_and_room_for_the_menu() {
+        // 67 is one short of all three; two (44) plus a gap and the tail
+        // (64) fit, three would not even without the tail.
+        assert_eq!(leading_that_fit(&[20., 20., 20.], 4., 67., 16.), 2);
+        // The tail is charged even when the verbs alone would have fit:
+        // two verbs and the tail need 64, so 60 shows only one.
+        assert_eq!(leading_that_fit(&[20., 20., 20.], 4., 60., 16.), 1);
+    }
+
+    #[test]
+    fn a_bar_too_narrow_for_any_verb_shows_only_the_menu() {
+        assert_eq!(leading_that_fit(&[20., 20.], 4., 30., 16.), 0);
+        assert_eq!(leading_that_fit(&[], 4., 30., 16.), 0);
     }
 
     #[test]

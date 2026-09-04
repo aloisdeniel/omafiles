@@ -27,3 +27,4 @@ pub mod recent;
 pub mod search;
 pub mod server;
 pub mod session;
+pub mod views;
