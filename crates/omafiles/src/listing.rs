@@ -4,17 +4,95 @@
 //! thread and swaps the result in when it lands, so nothing here needs to know
 //! about gpui.
 
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
-use crate::entry::{Entry, Kind};
+use serde::{Deserialize, Serialize};
+
+use crate::entry::{Entry, Kind, natural_cmp};
+
+/// The column a listing is ordered by.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortKey {
+    #[default]
+    Name,
+    Size,
+    Age,
+}
+
+impl SortKey {
+    /// The direction a first click on the column gives, as a file manager's
+    /// users expect it: names A to Z, the largest file first, the newest
+    /// first. Nobody clicks Size to find the smallest file.
+    pub fn natural_descending(self) -> bool {
+        matches!(self, SortKey::Size)
+    }
+}
+
+/// How a listing is ordered: the key, and whether it runs backwards.
+///
+/// "Ascending" is in the column's own terms — the name column's ascent is
+/// alphabetical, the size column's is small to large, and the *age* column's
+/// is young to old, so ascending age puts the newest file on top.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sort {
+    pub key: SortKey,
+    pub descending: bool,
+}
+
+impl Sort {
+    /// The order a click on `key`'s column asks for: a new column starts in
+    /// its natural direction, the current one turns around.
+    pub fn clicked(self, key: SortKey) -> Self {
+        if self.key == key {
+            Self {
+                key,
+                descending: !self.descending,
+            }
+        } else {
+            Self {
+                key,
+                descending: key.natural_descending(),
+            }
+        }
+    }
+
+    /// Directories first whatever the key — they have no size, and a listing
+    /// whose folders are scattered among the files by date is one you cannot
+    /// navigate — then by the key, with the natural name order breaking ties
+    /// so the order is total and two listings of one directory agree.
+    fn cmp(self, a: &Entry, b: &Entry) -> Ordering {
+        b.kind.is_dir().cmp(&a.kind.is_dir()).then_with(|| {
+            let by_key = match self.key {
+                SortKey::Name => Ordering::Equal,
+                SortKey::Size => a.size.cmp(&b.size),
+                // Later modification is a smaller age. An entry with no
+                // date (an unresolved link) has no age, and sorts old.
+                SortKey::Age => b.modified.cmp(&a.modified),
+            };
+            let within = by_key.then_with(|| natural_cmp(&a.name, &b.name));
+            if self.descending {
+                within.reverse()
+            } else {
+                within
+            }
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listing {
     pub path: PathBuf,
-    /// Everything in the directory, sorted. Hidden entries included — filtering
-    /// is [`Listing::visible`]'s job, so toggling "show hidden" does not need a
-    /// re-read from disk.
+    /// Everything in the directory, in name order. Hidden entries included —
+    /// filtering is [`Listing::visible`]'s job, so toggling "show hidden" does
+    /// not need a re-read from disk. Never reordered once read: the cursor
+    /// and the marks hold indices into it, and changing the sort must move
+    /// the rows, not what the cursor is on.
     entries: Vec<Entry>,
+    /// Indices into `entries` in display order, rebuilt by [`Listing::sort`].
+    order: Vec<usize>,
+    sort: Sort,
     /// Set when the directory could not be read at all. The path still shows,
     /// so the user can see *where* they are and navigate out.
     pub error: Option<String>,
@@ -37,6 +115,8 @@ impl Listing {
                 return Self {
                     path,
                     entries: Vec::new(),
+                    order: Vec::new(),
+                    sort: Sort::default(),
                     error: Some(err.to_string()),
                 };
             }
@@ -52,29 +132,58 @@ impl Listing {
 
         Self {
             path,
+            order: (0..entries.len()).collect(),
             entries,
+            sort: Sort::default(),
             error: None,
         }
+    }
+
+    /// Read `path` and order it by `sort` in one go, for the background
+    /// thread that has no view to ask afterwards.
+    pub fn read_sorted(path: &Path, sort: Sort) -> Self {
+        let mut listing = Self::read(path);
+        listing.sort(sort);
+        listing
     }
 
     pub fn empty(path: PathBuf) -> Self {
         Self {
             path,
             entries: Vec::new(),
+            order: Vec::new(),
+            sort: Sort::default(),
             error: None,
         }
     }
 
-    /// Indices into [`Self::all`] that should be shown.
+    /// Reorder the rows. Indices stay what they were, so a cursor or a mark
+    /// held across the call is still on the same entry, in its new place.
+    pub fn sort(&mut self, sort: Sort) {
+        self.sort = sort;
+        let entries = &self.entries;
+        // Already in name order, and `sort_by` is stable, so the name key is
+        // a no-op pass and every other key breaks its ties by name for free.
+        self.order = (0..entries.len()).collect();
+        if sort.key != SortKey::Name || sort.descending {
+            self.order
+                .sort_by(|&a, &b| sort.cmp(&entries[a], &entries[b]));
+        }
+    }
+
+    pub fn sort_order(&self) -> Sort {
+        self.sort
+    }
+
+    /// Indices into [`Self::all`] that should be shown, in display order.
     ///
     /// Returns indices rather than references so the caller can keep a cursor
-    /// that survives a hidden-files toggle.
+    /// that survives a hidden-files toggle or a change of sort.
     pub fn visible(&self, show_hidden: bool) -> Vec<usize> {
-        self.entries
+        self.order
             .iter()
-            .enumerate()
-            .filter(|(_, e)| show_hidden || !e.is_hidden())
-            .map(|(i, _)| i)
+            .copied()
+            .filter(|&i| show_hidden || !self.entries[i].is_hidden())
             .collect()
     }
 
@@ -228,6 +337,90 @@ mod tests {
         let listing = Listing::read(&t.0);
         assert_eq!(listing.index_of_name("b"), Some(1));
         assert_eq!(listing.index_of_name("nope"), None);
+    }
+
+    fn names_in_order(listing: &Listing) -> Vec<&str> {
+        listing
+            .visible(true)
+            .into_iter()
+            .map(|i| listing.get(i).unwrap().name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn sorting_moves_the_rows_but_not_the_indices() {
+        let t = Tree::new("sortkeys");
+        t.file("small", b"x")
+            .file("big", b"xxxxxxxx")
+            .file("mid", b"xxx")
+            .dir("folder");
+        let mut listing = Listing::read(&t.0);
+        assert_eq!(names_in_order(&listing), ["folder", "big", "mid", "small"]);
+        let big = listing.index_of_name("big").unwrap();
+
+        listing.sort(Sort {
+            key: SortKey::Size,
+            descending: true,
+        });
+        assert_eq!(
+            names_in_order(&listing),
+            ["folder", "big", "mid", "small"],
+            "directories stay first, then largest first"
+        );
+        listing.sort(Sort {
+            key: SortKey::Size,
+            descending: false,
+        });
+        assert_eq!(names_in_order(&listing), ["folder", "small", "mid", "big"]);
+        assert_eq!(
+            listing.index_of_name("big"),
+            Some(big),
+            "an index still names the same entry after a re-sort"
+        );
+
+        listing.sort(Sort {
+            key: SortKey::Name,
+            descending: true,
+        });
+        assert_eq!(names_in_order(&listing), ["folder", "small", "mid", "big"]);
+    }
+
+    #[test]
+    fn age_ascending_is_newest_first_and_dateless_last() {
+        let t = Tree::new("sortage");
+        t.file("old", b"").file("new", b"");
+        let ancient = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        std::fs::File::options()
+            .write(true)
+            .open(t.0.join("old"))
+            .unwrap()
+            .set_modified(ancient)
+            .unwrap();
+        std::os::unix::fs::symlink(t.0.join("missing"), t.0.join("link")).unwrap();
+
+        let mut listing = Listing::read(&t.0);
+        listing.sort(Sort {
+            key: SortKey::Age,
+            descending: false,
+        });
+        assert_eq!(names_in_order(&listing), ["new", "old", "link"]);
+        listing.sort(Sort {
+            key: SortKey::Age,
+            descending: true,
+        });
+        assert_eq!(names_in_order(&listing), ["link", "old", "new"]);
+    }
+
+    #[test]
+    fn a_click_turns_the_current_column_and_starts_a_new_one_naturally() {
+        let sort = Sort::default();
+        let by_size = sort.clicked(SortKey::Size);
+        assert_eq!(by_size.key, SortKey::Size);
+        assert!(by_size.descending, "size starts largest first");
+        assert!(!by_size.clicked(SortKey::Size).descending);
+        let by_age = by_size.clicked(SortKey::Age);
+        assert!(!by_age.descending, "age starts newest first");
+        assert!(!by_age.clicked(SortKey::Name).descending);
     }
 
     #[test]

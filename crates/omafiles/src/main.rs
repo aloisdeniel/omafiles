@@ -44,7 +44,7 @@ use omafiles::git;
 use omafiles::grep;
 use omafiles::imageops;
 use omafiles::keymap;
-use omafiles::listing::{Listing, describe_empty, is_navigable};
+use omafiles::listing::{Listing, SortKey, describe_empty, is_navigable};
 use omafiles::network;
 use omafiles::places::{Origin, Place, Places};
 use omafiles::preview::{self, Body, Preview, Target};
@@ -52,6 +52,7 @@ use omafiles::recent;
 use omafiles::search::{Match, Search, walk};
 use omafiles::server;
 use omafiles::session::{Session, Tab};
+use omafiles::views::{DirectoryView, Views};
 use omarchy_ui::{
     ActionButton, ActiveTheme as _, Badge, Breadcrumb, Modal, ModalSize, Row, SectionHeader,
     Separator, SyntaxPalette, Theme,
@@ -1228,6 +1229,38 @@ struct PanelResize {
 /// it the listing would be a sliver, and the panels are about the listing.
 const CENTER_MIN_FRACTION: f32 = 0.3;
 
+/// The two draggable boundaries in the listing header. Named by the column
+/// on their right, which is the one whose left edge they are: the name
+/// column takes whatever is left, so it has no width of its own to drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColumnDivider {
+    /// Between the name and the size column.
+    Size,
+    /// Between the size and the age column.
+    Age,
+}
+
+/// A column boundary being dragged: which one, where the pointer started,
+/// and how wide the two right-hand columns were then. Applied to the
+/// directory's view as the pointer moves and written to disk on mouse up,
+/// the same shape as [`PanelResize`].
+#[derive(Debug, Clone, Copy)]
+struct ColumnResize {
+    divider: ColumnDivider,
+    start_x: f32,
+    start_size: f32,
+    start_age: f32,
+}
+
+/// The narrowest a listing column can be dragged: room for a label and the
+/// glyph after it. Below that the column says nothing, and the values in it
+/// would be clipped to a digit.
+const COLUMN_MIN: f32 = 40.;
+
+/// The widest. Past this the size or age column is eating the name column,
+/// which is the one column a listing cannot do without.
+const COLUMN_MAX: f32 = 320.;
+
 /// The narrowest a panel goes, as a share of `dropdown-width`. Half the
 /// default keeps every row's icon and a few characters of its label; below
 /// that the panel says nothing, and collapsing it is the honest gesture.
@@ -1305,6 +1338,10 @@ struct Explorer {
     right_open: bool,
     /// The panel edge under the pointer while it is being dragged.
     resizing: Option<PanelResize>,
+    /// The listing column boundary under the pointer while it is dragged.
+    column_resizing: Option<ColumnResize>,
+    /// How each directory's listing is sorted and its columns sized.
+    views: Views,
     /// The window's width as of the last frame, so the panel widths can be
     /// clamped against it from code that only has the app context.
     viewport_width: f32,
@@ -1413,13 +1450,14 @@ impl Explorer {
         let config_dir = config_dir();
         let session_path = session_path();
         let session = Session::load(&session_path, start);
+        let views = Views::load(&config_dir);
 
         let mut listings = HashMap::new();
         let mut cursors = HashMap::new();
         // Seed the active tab synchronously so the first frame has content;
         // the rest load lazily when switched to.
         if let Some(tab) = session.active_tab() {
-            let listing = Listing::read(tab.path());
+            let listing = Listing::read_sorted(tab.path(), views.get(tab.path()).sort());
             if let Some(index) = tab
                 .cursor_name
                 .as_deref()
@@ -1454,6 +1492,8 @@ impl Explorer {
             left_open: true,
             right_open: true,
             resizing: None,
+            column_resizing: None,
+            views,
             viewport_width: 0.0,
             left_scroll: gpui::ScrollHandle::new(),
             right_scroll: gpui::ScrollHandle::new(),
@@ -1797,12 +1837,13 @@ impl Explorer {
             .remembered_cursor()
             .map(str::to_string)
             .or_else(|| tab.cursor_name.clone());
+        let sort = self.views.get(&path).sort();
 
         // Read off the main thread; the previous listing stays on screen until
         // the new one lands, so navigation never blanks the window.
         self._pending = Some(cx.spawn(async move |this, cx| {
             let listing = cx
-                .background_spawn(async move { Listing::read(&path) })
+                .background_spawn(async move { Listing::read_sorted(&path, sort) })
                 .await;
 
             let _ = this.update(cx, |this, cx| {
@@ -4354,7 +4395,8 @@ impl Explorer {
                             // when a file appears or disappears above it.
                             let keep = this.cursor_name();
                             let id = this.tab_id();
-                            let listing = Listing::read(&this.current_path());
+                            let path = this.current_path();
+                            let listing = Listing::read_sorted(&path, this.views.get(&path).sort());
                             this.listings.insert(id.clone(), listing);
                             this.prune_selection_of(&id);
                             let restored = this.restore_cursor(keep.as_deref()).or_else(|| {
@@ -4672,27 +4714,36 @@ impl Render for Explorer {
                 this.left_open = !this.left_open;
                 cx.notify();
             }))
-            // A panel resize is tracked here, on the container that spans
-            // the window, so the drag keeps following the pointer once it
-            // has left the hairline it started on.
+            // A panel or column resize is tracked here, on the container
+            // that spans the window, so the drag keeps following the pointer
+            // once it has left the hairline it started on.
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
-                if this.resizing.is_none() {
+                if this.resizing.is_none() && this.column_resizing.is_none() {
                     return;
                 }
                 // The button came up somewhere the window did not see it.
                 if event.pressed_button != Some(gpui::MouseButton::Left) {
                     this.end_panel_resize(cx);
+                    this.end_column_resize(cx);
                     return;
                 }
-                this.drag_panel_edge(f32::from(event.position.x), cx);
+                let x = f32::from(event.position.x);
+                this.drag_panel_edge(x, cx);
+                this.drag_column_divider(x, cx);
             }))
             .on_mouse_up(
                 gpui::MouseButton::Left,
-                cx.listener(|this, _e, _, cx| this.end_panel_resize(cx)),
+                cx.listener(|this, _e, _, cx| {
+                    this.end_panel_resize(cx);
+                    this.end_column_resize(cx);
+                }),
             )
             .on_mouse_up_out(
                 gpui::MouseButton::Left,
-                cx.listener(|this, _e, _, cx| this.end_panel_resize(cx)),
+                cx.listener(|this, _e, _, cx| {
+                    this.end_panel_resize(cx);
+                    this.end_column_resize(cx);
+                }),
             )
             .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| {
                 this.right_open = !this.right_open;
@@ -5140,6 +5191,247 @@ impl Explorer {
         cx.notify();
     }
 
+    // ----------------------------------------------- the listing's columns
+
+    /// The size and age column widths for the directory on screen: what was
+    /// dragged for it, or the built-in widths until then.
+    fn column_widths(&self) -> (f32, f32) {
+        let view = self.views.get(&self.current_path());
+        let width = |asked: Option<u32>, default: f32| {
+            asked
+                .map_or(default, |w| w as f32)
+                .clamp(COLUMN_MIN, COLUMN_MAX)
+        };
+        (
+            width(view.size_width, SIZE_COLUMN),
+            width(view.age_width, AGE_COLUMN),
+        )
+    }
+
+    /// Record how the directory on screen is laid out, apply its sort to
+    /// every tab looking at it, and keep the cursor's row in sight.
+    fn update_view(&mut self, view: DirectoryView, cx: &mut Context<Self>) {
+        let path = self.current_path();
+        let sort = view.sort();
+        self.views.set(&path, view);
+        for listing in self.listings.values_mut() {
+            if listing.path == path && listing.sort_order() != sort {
+                listing.sort(sort);
+            }
+        }
+        self.scroll_to_cursor();
+        cx.notify();
+    }
+
+    /// The layout the user reached is the one the directory opens with next
+    /// time, in every tab and every session.
+    fn save_views(&mut self, cx: &mut Context<Self>) {
+        if let Err(err) = self.views.save(&self.config_dir) {
+            self.notify_user(format!("could not save the listing layout: {err}"), cx);
+        }
+    }
+
+    /// A click on a column label: sort by it, or turn the sort around if it
+    /// already is. The cursor stays on its entry and follows it to its new
+    /// row — sorting is about the rows, not about what is selected.
+    fn click_column(&mut self, key: SortKey, cx: &mut Context<Self>) {
+        let mut view = self.views.get(&self.current_path());
+        view.set_sort(view.sort().clicked(key));
+        self.update_view(view, cx);
+        self.save_views(cx);
+    }
+
+    fn start_column_resize(&mut self, divider: ColumnDivider, x: f32, cx: &mut Context<Self>) {
+        let (start_size, start_age) = self.column_widths();
+        self.column_resizing = Some(ColumnResize {
+            divider,
+            start_x: x,
+            start_size,
+            start_age,
+        });
+        cx.notify();
+    }
+
+    /// Follow the pointer: the boundary moves with it, so the column on its
+    /// left grows by what the one on its right gives up. The name column
+    /// takes whatever is left, so its boundary only has the size column to
+    /// trade with; the other boundary trades size for age.
+    fn drag_column_divider(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some(resize) = self.column_resizing else {
+            return;
+        };
+        let travel = x - resize.start_x;
+        let (size, age) = match resize.divider {
+            ColumnDivider::Size => (resize.start_size - travel, resize.start_age),
+            ColumnDivider::Age => {
+                // Clamp the pair together, so that when one column hits its
+                // floor the other stops too and the boundary stays under the
+                // pointer rather than the columns sliding as a block.
+                let age = (resize.start_age - travel).clamp(COLUMN_MIN, COLUMN_MAX);
+                let size =
+                    (resize.start_size + resize.start_age - age).clamp(COLUMN_MIN, COLUMN_MAX);
+                (size, resize.start_size + resize.start_age - size)
+            }
+        };
+        // Stored already clamped, so a drag past the limit does not bank an
+        // invisible surplus that the next drag has to burn through.
+        let size = size.clamp(COLUMN_MIN, COLUMN_MAX).round() as u32;
+        let age = age.clamp(COLUMN_MIN, COLUMN_MAX).round() as u32;
+        let mut view = self.views.get(&self.current_path());
+        if view.size_width != Some(size) || view.age_width != Some(age) {
+            view.size_width = Some(size);
+            view.age_width = Some(age);
+            self.update_view(view, cx);
+        }
+    }
+
+    /// Let go: the widths the columns landed on are written down.
+    fn end_column_resize(&mut self, cx: &mut Context<Self>) {
+        if self.column_resizing.take().is_none() {
+            return;
+        }
+        self.save_views(cx);
+        cx.notify();
+    }
+
+    /// The column labels above the listing.
+    ///
+    /// Built from a plain `div` rather than a [`Row`]: this one is never the
+    /// cursor and never marked, and giving it a row's interaction vocabulary
+    /// would only invite it to light up as one. It borrows the row's metrics —
+    /// height, padding, gap, column widths — so the labels line up with the
+    /// values. Each label is a button that sorts by its column, and the rule
+    /// before the size and age labels is a grip that resizes them.
+    fn listing_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let space = theme.space();
+        let caption = theme.type_scale().caption();
+        let dim = theme.dim_foreground();
+        let fg = theme.foreground();
+        let gap = space.control_gap();
+        let (height, padding) = (space.control_height(), space.row_padding_x());
+        let sort = self.views.get(&self.current_path()).sort();
+        let (size_width, age_width) = self.column_widths();
+
+        // Uppercase caption in secondary text — the same treatment
+        // `SectionHeader` gives the sidebar's group labels, because this is
+        // the same kind of thing. The sorted column carries a caret after its
+        // name, pointing the way its values run down the list.
+        let label = |key: SortKey, text: &'static str, cx: &mut Context<Self>| {
+            let caret = (sort.key == key).then_some(if sort.descending {
+                "\u{f0d7}" // nf-fa-caret_down
+            } else {
+                "\u{f0d8}" // nf-fa-caret_up
+            });
+            div()
+                .id(("sort-by", key as usize))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(gap * 0.5))
+                .min_w(px(0.))
+                .cursor_pointer()
+                .text_color(if sort.key == key { fg } else { dim })
+                .hover(|style| style.text_color(fg))
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.click_column(key, cx);
+                }))
+                .child(div().truncate().child(text))
+                .children(caret)
+        };
+        let name = label(SortKey::Name, "NAME", cx);
+        let size = label(SortKey::Size, "SIZE", cx);
+        let age = label(SortKey::Age, "AGE", cx);
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(gap))
+            .w_full()
+            .h(px(height))
+            .px(px(padding))
+            .text_size(px(caption))
+            .text_color(dim)
+            // The icon column has no label — a glyph needs none — but it
+            // still has to be reserved, or every label sits one column to
+            // the left.
+            .child(div().w(px(caption * ICON_COLUMN)).flex_shrink_0())
+            .child(div().flex_1().min_w(px(0.)).child(name))
+            .child(
+                div()
+                    .relative()
+                    .w(px(size_width))
+                    .flex_shrink_0()
+                    .child(size)
+                    .child(self.column_grip(ColumnDivider::Size, gap, cx)),
+            )
+            .child(
+                div()
+                    .relative()
+                    .w(px(age_width))
+                    .flex_shrink_0()
+                    .child(age)
+                    .child(self.column_grip(ColumnDivider::Age, gap, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// The rule at a header column's left edge, widened into a grip the way
+    /// the panel rules are: a faint hairline in the middle of the gap before
+    /// the column, and a few invisible pixels either side that take the
+    /// pointer. Absolutely placed, so it costs the header no width and the
+    /// labels stay over the values.
+    fn column_grip(
+        &mut self,
+        divider: ColumnDivider,
+        gap: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let thickness = theme.space().hairline();
+        let reach = theme.space().sm().max(4.0);
+        let rule = theme.border().opacity(0.2);
+        let lit = theme.border();
+        let accent = theme.accent();
+        let dragging = self.column_resizing.is_some_and(|r| r.divider == divider);
+        let (id, group) = match divider {
+            ColumnDivider::Size => ("column-grip-size", "column-grip-size"),
+            ColumnDivider::Age => ("column-grip-age", "column-grip-age"),
+        };
+        div()
+            .id(id)
+            .group(group)
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(-(gap + thickness) / 2.0 - reach))
+            .w(px(thickness + reach * 2.0))
+            .flex()
+            .flex_row()
+            .justify_center()
+            .cursor_col_resize()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _w, cx| {
+                    this.start_column_resize(divider, f32::from(event.position.x), cx)
+                }),
+            )
+            .child(
+                div()
+                    .h_full()
+                    .w(px(thickness))
+                    // Lit while dragged, so the edge being moved is the one
+                    // thing on screen that says so; brighter under the
+                    // pointer, so the grip announces itself before the drag.
+                    .bg(if dragging { accent } else { rule })
+                    .group_hover(group, move |style| {
+                        style.bg(if dragging { accent } else { lit })
+                    }),
+            )
+            .into_any_element()
+    }
+
     /// Below this the panels dock as overlays instead of taking space.
     ///
     /// Derived from the token scale rather than a magic number, so it tracks
@@ -5546,6 +5838,7 @@ impl Explorer {
                         })
                         .collect(),
                 );
+                let columns = this.column_widths();
                 let Some(listing) = this.listings.get(&this.tab_id()) else {
                     return Vec::new();
                 };
@@ -5594,6 +5887,7 @@ impl Explorer {
                             cursor == Some(index),
                             is_selected,
                             state,
+                            columns,
                             cx,
                         )
                         .draggable(
@@ -5666,7 +5960,7 @@ impl Explorer {
             // The header sits outside the scrolling area, so it stays put while
             // the listing moves under it and the scrollbar does not run across
             // it.
-            .child(listing_header(cx))
+            .child(self.listing_header(cx))
             .child(Separator::horizontal())
             .child(
                 div()
@@ -7933,11 +8227,13 @@ impl Render for DragPreview {
     }
 }
 
-/// Width of the listing's size column.
+/// Width of the listing's size column until the user drags it; a dragged
+/// width is kept per directory in `views.toml`.
 ///
-/// Shared with [`listing_header`] rather than written at both call sites: the
-/// two have to agree to the pixel or the labels stop sitting over the values
-/// they name, and that is the kind of drift nobody sees in a diff.
+/// Read through `Explorer::column_widths` by both the header and the rows
+/// rather than written at two call sites: the two have to agree to the pixel
+/// or the labels stop sitting over the values they name, and that is the
+/// kind of drift nobody sees in a diff.
 const SIZE_COLUMN: f32 = 72.;
 
 /// Width of the listing's age column. See [`SIZE_COLUMN`].
@@ -7947,55 +8243,24 @@ const AGE_COLUMN: f32 = 48.;
 /// `omarchy display text size` like everything else.
 const ICON_COLUMN: f32 = 1.6;
 
-/// The column labels above the listing.
-///
-/// Built from a plain `div` rather than a [`Row`]: this one is never hovered,
-/// never the cursor, and never clicked, and giving it a row's interaction
-/// vocabulary would only invite it to light up. It borrows the row's metrics —
-/// height, padding, gap, column widths — so the labels line up with the values.
-fn listing_header(cx: &mut App) -> AnyElement {
-    let theme = cx.theme();
-    let space = theme.space();
-    let caption = theme.type_scale().caption();
-    let dim = theme.dim_foreground();
-
-    // Uppercase caption in secondary text — the same treatment `SectionHeader`
-    // gives the sidebar's group labels, because this is the same kind of thing.
-    let column = |label: &'static str, width: f32| div().w(px(width)).flex_shrink_0().child(label);
-
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(space.control_gap()))
-        .w_full()
-        .h(px(space.control_height()))
-        .px(px(space.row_padding_x()))
-        .text_size(px(caption))
-        .text_color(dim)
-        // The icon column has no label — a glyph needs none — but it still has
-        // to be reserved, or every label sits one column to the left.
-        .child(div().w(px(caption * ICON_COLUMN)).flex_shrink_0())
-        .child(div().flex_1().min_w(px(0.)).child("NAME"))
-        .child(column("SIZE", SIZE_COLUMN))
-        .child(column("AGE", AGE_COLUMN))
-        .into_any_element()
-}
-
 /// One listing row.
 ///
 /// `git` is what the repository says about this entry, if the status has landed
 /// and it has anything to say. It rides on the icon rather than taking a column
 /// of its own: a marker column would cost width in every directory, and most
 /// directories are not in a repository at all.
+///
+/// `columns` is the `(size, age)` width pair the header was drawn with.
 fn entry_row(
     position: usize,
     entry: &Entry,
     is_cursor: bool,
     is_selected: bool,
     git: Option<git::State>,
+    columns: (f32, f32),
     cx: &mut App,
 ) -> Row {
+    let (size_width, age_width) = columns;
     let theme = cx.theme();
     let caption = theme.type_scale().caption();
     let dim = theme.dim_foreground();
@@ -8069,16 +8334,18 @@ fn entry_row(
         }))
         .child(
             div()
-                .w(px(SIZE_COLUMN))
+                .w(px(size_width))
                 .flex_shrink_0()
+                .truncate()
                 .text_size(px(caption))
                 .text_color(dim)
                 .child(size),
         )
         .child(
             div()
-                .w(px(AGE_COLUMN))
+                .w(px(age_width))
                 .flex_shrink_0()
+                .truncate()
                 .text_size(px(caption))
                 .text_color(dim)
                 .child(age),
