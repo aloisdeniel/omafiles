@@ -96,6 +96,7 @@
   .col{min-width:0;display:flex;flex-direction:column}
   .col+.col{border-left:1px solid var(--hairline)}
   .bar{display:flex;align-items:center;gap:4px;padding:4px;height:32px;border-bottom:1px solid var(--hairline);flex:none}
+  .quiet.tight{margin-left:0}
   .quiet{margin-left:auto;width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;color:var(--dark-foreground);flex:none}
   .navbtn{min-width:24px;height:24px;padding:0 6px;display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid var(--hairline);border-radius:2px;color:var(--dark-foreground);flex:none;font-size:11px}
   .navbtn.on{color:var(--accent);border-color:color-mix(in srgb, var(--accent) 40%, transparent)}
@@ -272,7 +273,7 @@
                 <!-- the entry's verbs, as many as fit from the left; the … holds the rest -->
                 <div class="bar">
                   <span class="navbtn">&#xf06e;</span><span class="navbtn">&#xf08e;</span><span class="navbtn">&#xf0c1;</span><span class="navbtn">&#xf0c5;</span><span class="navbtn">&#xf1e0;</span><span class="navbtn">&#xf06a9;</span><span class="navbtn">&#xf0c4;</span>
-                  <span class="quiet">&#xf141;</span>
+                  <span class="quiet">&#xf141;</span><span class="quiet tight">&#xf101;</span>
                 </div>
                 <div class="cover"><span class="t-sec">[workspace]</span><br><span class="t-key">resolver</span> <span class="t-op">=</span> <span class="t-str">"2"</span><br><span class="t-key">members</span> <span class="t-op">=</span> [<br>&nbsp;&nbsp;<span class="t-str">"crates/omarchy-tokens"</span>,<br>&nbsp;&nbsp;<span class="t-str">"crates/omarchy-ui"</span>,<br>&nbsp;&nbsp;<span class="t-str">"crates/omafiles"</span>,<br>]</div>
                 <div class="info">

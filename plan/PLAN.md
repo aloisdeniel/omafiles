@@ -1875,6 +1875,20 @@ exercised against a live server here (none reachable); the mount-point resolutio
 the list machinery are headless-tested, and the row is mouse-only for now like Recent's
 was.
 
+**A narrow window no longer loses the detail panel** (2026-09-04, on request): the
+window once opened both panels floating over the listing the moment it went narrow,
+stacked, so the first click anywhere shut the top one — and that click wrote to the
+same flag the docked layout reads, leaving a wider window with no detail panel and
+no control on screen to bring it back. Three changes. The float is its own state
+(`Explorer::floating`, one side at most), opened from a strip and dismissed by the
+scrim, and dropped on the frame that docks the panels again; the docked intent is
+untouched by anything that happens while floating. Narrow mode now starts with
+nothing floating and both strips showing. And the detail panel got what the sidebar
+always had: a strip one button wide when collapsed (`detail_strip`) and a borderless
+collapse at the far right of its bar, so every panel can be closed and reopened with
+the mouse. `is_narrow` became `narrow`, read from the width recorded at the top of
+the frame, so the handlers between frames and the layout within one agree.
+
 **Three bars, one per panel** (2026-09-04, on request): the navigation bar stopped
 spanning the listing and the detail panel together. The listing keeps back, up and the
 path; the detail panel got a bar of its own holding the entry's verbs, which left the

@@ -1350,11 +1350,19 @@ struct Explorer {
     watcher: Option<DirWatcher>,
     session_watcher: Option<DirWatcher>,
     overlay: Option<Overlay>,
-    /// Panel visibility. Both are *user intent*; a narrow window overrides them
-    /// at render time without forgetting what was asked for, so widening the
-    /// window restores the panels rather than leaving them shut.
+    /// Panel visibility, docked. Both are *user intent*; a narrow window
+    /// overrides them at render time without forgetting what was asked for,
+    /// so widening the window restores the panels rather than leaving them
+    /// shut.
     left_open: bool,
     right_open: bool,
+    /// The panel floating over the listing while the window is too narrow
+    /// to dock one — at most one, opened from its strip and dismissed by a
+    /// click beside it. Separate from the docked intent on purpose: the
+    /// dismissing click must not close a panel the wider window would have
+    /// shown (on request — it once left the window with no detail panel
+    /// and no way back but the keyboard).
+    floating: Option<PanelSide>,
     /// The panel edge under the pointer while it is being dragged.
     resizing: Option<PanelResize>,
     /// The listing column boundary under the pointer while it is dragged.
@@ -1510,6 +1518,7 @@ impl Explorer {
             overlay: None,
             left_open: true,
             right_open: true,
+            floating: None,
             resizing: None,
             column_resizing: None,
             views,
@@ -4474,6 +4483,11 @@ impl Render for Explorer {
             self.tab_drop = None;
         }
         self.viewport_width = f32::from(window.viewport_size().width);
+        // A float belongs to the narrow window; the frame that docks the
+        // panels again drops it, so the next narrowing starts clean.
+        if !self.narrow(cx) {
+            self.floating = None;
+        }
         // One call site, at the top of the frame, rather than in each of the
         // dozen places the cursor can move. It is a key comparison when nothing
         // changed, and it cannot be forgotten the way a dozen calls can.
@@ -4747,8 +4761,7 @@ impl Render for Explorer {
             )
             .on_action(cx.listener(|this, _: &ShowHelp, window, cx| this.show_help(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleLeftPanel, _, cx| {
-                this.left_open = !this.left_open;
-                cx.notify();
+                this.toggle_panel(PanelSide::Left, cx)
             }))
             // A panel or column resize is tracked here, on the container
             // that spans the window, so the drag keeps following the pointer
@@ -4782,8 +4795,7 @@ impl Render for Explorer {
                 }),
             )
             .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| {
-                this.right_open = !this.right_open;
-                cx.notify();
+                this.toggle_panel(PanelSide::Right, cx)
             }))
             .on_action(cx.listener(|this, _: &EditPath, window, cx| this.edit_path(window, cx)))
             .on_action(cx.listener(|this, _: &GoParent, _, cx| {
@@ -4817,11 +4829,11 @@ impl Render for Explorer {
                     // No padding or gap on the shell: the rules must reach the
                     // window edges and sit flush against the bars they divide.
                     // Every region below supplies its own inner spacing.
-                    .child(self.panes(window, cx))
+                    .child(self.panes(cx))
                     .child(Separator::horizontal())
                     .child(self.status_bar(cx)),
             )
-            .children(self.floating_panels(window, cx))
+            .children(self.floating_panels(cx))
             .children(self.overlay_layer(window, cx))
     }
 }
@@ -4864,7 +4876,9 @@ impl Explorer {
             .on_click(cx.listener(|this, _e, window, cx| this.edit_path(window, cx)))
             .into_any_element();
 
-        let tools = if self.left_open {
+        // On screen — docked or floating — the sidebar's own bar has them;
+        // collapsed to a strip, they ride here.
+        let tools = if self.panel_shown(PanelSide::Left, cx) {
             Vec::new()
         } else {
             self.tool_buttons(cx)
@@ -4932,10 +4946,7 @@ impl Explorer {
             "sidebar-collapse",
             "\u{f100}", // nf-fa-angle_double_left
             dim,
-            cx.listener(|this, _e, _w, cx| {
-                this.left_open = false;
-                cx.notify();
-            }),
+            cx.listener(|this, _e, _w, cx| this.close_panel(PanelSide::Left, cx)),
             cx,
         );
         div()
@@ -4965,10 +4976,44 @@ impl Explorer {
             "sidebar-expand",
             "\u{f101}", // nf-fa-angle_double_right
             dim,
-            cx.listener(|this, _e, _w, cx| {
-                this.left_open = true;
-                cx.notify();
-            }),
+            cx.listener(|this, _e, _w, cx| this.open_panel(PanelSide::Left, cx)),
+            cx,
+        );
+        div()
+            .flex()
+            .flex_col()
+            .w(px(width))
+            .flex_shrink_0()
+            .h_full()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .flex_shrink_0()
+                    .h(px(height))
+                    .p(px(inset))
+                    .child(expand),
+            )
+            .child(Separator::horizontal())
+            .into_any_element()
+    }
+
+    /// The detail panel's counterpart to [`Self::sidebar_strip`]: one
+    /// button wide at the right edge, holding only the way to expand it.
+    fn detail_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let space = theme.space();
+        let inset = space.sm();
+        let height = Self::bar_height(space);
+        let width = theme.type_scale().caption() * ICON_COLUMN + inset * 2.0;
+        let dim = theme.dim_foreground();
+        let expand = quiet_button(
+            "detail-expand",
+            "\u{f100}", // nf-fa-angle_double_left
+            dim,
+            cx.listener(|this, _e, _w, cx| this.open_panel(PanelSide::Right, cx)),
             cx,
         );
         div()
@@ -5036,8 +5081,8 @@ impl Explorer {
     }
 
     /// The two panes: the listing, and a detail pane M7 turns into the preview.
-    fn panes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let narrow = self.is_narrow(window, cx);
+    fn panes(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let narrow = self.narrow(cx);
 
         // In a narrow window the panels stop taking space and become overlays,
         // so the listing always keeps a usable width. `left_open` is not
@@ -5075,11 +5120,18 @@ impl Explorer {
             content = content.child(self.expanded_pane(cx));
         } else {
             content = content.child(self.listing_column(cx));
-            if !narrow && self.right_open {
-                content = content
+            // The detail panel, or its strip — the same pair the sidebar
+            // has, so a collapsed panel always leaves the way back on
+            // screen (on request).
+            content = if !narrow && self.right_open {
+                content
                     .child(self.resize_handle(PanelSide::Right, cx))
-                    .child(self.detail_column(cx));
-            }
+                    .child(self.detail_column(cx))
+            } else {
+                content
+                    .child(Separator::vertical())
+                    .child(self.detail_strip(cx))
+            };
         }
         row.child(content).into_any_element()
     }
@@ -5277,7 +5329,9 @@ impl Explorer {
             }
         };
         let more_width = caption * ICON_COLUMN;
-        let room = self.panel_width(PanelSide::Right, cx) - inset * 2.0;
+        // The collapse control at the far right is always there; the verbs
+        // share what is left of the bar with the menu button.
+        let room = self.panel_width(PanelSide::Right, cx) - inset * 3.0 - more_width;
 
         let actions = self.detail_actions();
         let widths: Vec<f32> = actions.iter().map(|a| button_width(a.label)).collect();
@@ -5293,17 +5347,22 @@ impl Explorer {
             .p(px(inset))
             .overflow_hidden();
         let hidden = shown < actions.len();
+        // The verbs from the left, then the spacer, then the bar's own
+        // controls at the far right.
+        let mut verbs = Vec::new();
         for action in actions.into_iter().take(shown) {
             let act = action.act;
-            bar = bar.child(
+            verbs.push(
                 ActionButton::new(action.id)
                     .glyph(action.glyph)
                     .label(action.label)
                     .compact(compact)
                     .enabled(action.enabled)
-                    .on_click(cx.listener(move |this, _e, window, cx| act(this, window, cx))),
+                    .on_click(cx.listener(move |this, _e, window, cx| act(this, window, cx)))
+                    .into_any_element(),
             );
         }
+        bar = bar.children(verbs).child(div().flex_1());
         if hidden {
             // Borderless, at the far right: it is about the bar itself, not
             // one of the verbs, so it must not read as one more of them.
@@ -5316,9 +5375,18 @@ impl Explorer {
                 }),
                 cx,
             );
-            bar = bar.child(div().flex_1()).child(more);
+            bar = bar.child(more);
         }
-        bar.into_any_element()
+        // Borderless like the sidebar's: a control about the panel itself,
+        // not one of its verbs.
+        let collapse = quiet_button(
+            "detail-collapse",
+            "\u{f101}", // nf-fa-angle_double_right
+            dim,
+            cx.listener(|this, _e, _w, cx| this.close_panel(PanelSide::Right, cx)),
+            cx,
+        );
+        bar.child(collapse).into_any_element()
     }
 
     /// A panel's width for this frame: the one the user dragged it to, or
@@ -5701,24 +5769,83 @@ impl Explorer {
     /// Derived from the token scale rather than a magic number, so it tracks
     /// the user's text size: at a larger `base-size` the panels need more room
     /// and should give up sooner.
-    fn is_narrow(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    /// Too narrow to dock the panels: two of them plus a listing at least
+    /// as wide as one. From the width recorded at the top of the frame, so
+    /// every decision in the frame — and the handlers between frames —
+    /// agree; `panel_width` makes the same test to know whether a panel
+    /// has a docked neighbour to leave room for.
+    fn narrow(&self, cx: &App) -> bool {
         let panel = cx.theme().space().dropdown_width();
-        // Two panels plus a listing at least as wide as one of them. The
-        // same test, from the recorded width, decides in `panel_width`
-        // whether a panel has a docked neighbour to leave room for.
-        window.viewport_size().width < px(panel * 3.0)
+        self.viewport_width < panel * 3.0
     }
 
-    /// The panels, drawn over the listing when the window is too narrow to
-    /// dock them.
-    fn floating_panels(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        if !self.is_narrow(window, cx) {
+    /// Whether a panel is on screen: floating in a narrow window, docked
+    /// otherwise.
+    fn panel_shown(&self, side: PanelSide, cx: &App) -> bool {
+        if self.narrow(cx) {
+            self.floating == Some(side)
+        } else {
+            match side {
+                PanelSide::Left => self.left_open,
+                PanelSide::Right => self.right_open,
+            }
+        }
+    }
+
+    /// A strip's expand, or the key: float the panel in a narrow window,
+    /// dock it in a wide one.
+    fn open_panel(&mut self, side: PanelSide, cx: &mut Context<Self>) {
+        if self.narrow(cx) {
+            self.floating = Some(side);
+        } else {
+            match side {
+                PanelSide::Left => self.left_open = true,
+                PanelSide::Right => self.right_open = true,
+            }
+        }
+        cx.notify();
+    }
+
+    /// A bar's collapse, a scrim click, or the key. In a narrow window only
+    /// the float goes; the docked intent is untouched, so widening the
+    /// window brings the panel back.
+    fn close_panel(&mut self, side: PanelSide, cx: &mut Context<Self>) {
+        if self.narrow(cx) {
+            if self.floating == Some(side) {
+                self.floating = None;
+            }
+        } else {
+            match side {
+                PanelSide::Left => self.left_open = false,
+                PanelSide::Right => self.right_open = false,
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_panel(&mut self, side: PanelSide, cx: &mut Context<Self>) {
+        if self.panel_shown(side, cx) {
+            self.close_panel(side, cx);
+        } else {
+            self.open_panel(side, cx);
+        }
+    }
+
+    /// The panel floating over the listing, when the window is too narrow
+    /// to dock one and a strip has opened it. One at a time: two scrims
+    /// stacked left nothing but the top panel clickable, and the click that
+    /// dismissed it used to shut the panel for good.
+    fn floating_panels(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if !self.narrow(cx) {
             return Vec::new();
         }
         let scrim = omarchy_ui::color(cx.theme().tokens.palette.darker_background()).opacity(0.6);
 
         let mut layers = Vec::new();
-        for (open, left) in [(self.left_open, true), (self.right_open, false)] {
+        for (open, left) in [
+            (self.floating == Some(PanelSide::Left), true),
+            (self.floating == Some(PanelSide::Right), false),
+        ] {
             if !open {
                 continue;
             }
@@ -5748,12 +5875,12 @@ impl Explorer {
                 .flex()
                 .flex_row()
                 .on_click(cx.listener(move |this, _e, _w, cx| {
-                    if left {
-                        this.left_open = false;
+                    let side = if left {
+                        PanelSide::Left
                     } else {
-                        this.right_open = false;
-                    }
-                    cx.notify();
+                        PanelSide::Right
+                    };
+                    this.close_panel(side, cx);
                 }));
             layer = if left {
                 layer.justify_start()
