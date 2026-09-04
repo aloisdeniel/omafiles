@@ -916,6 +916,13 @@ enum Overlay {
         /// keyboard route) centres it like any other modal.
         position: Option<Point<Pixels>>,
     },
+    /// The `\u{2026}` at the right edge of the detail bar: the entry's verbs
+    /// the bar was too narrow to show, in the order they would have had.
+    DetailMenu {
+        /// How many the bar did show, so the menu starts where it stopped.
+        shown: usize,
+        position: Option<Point<Pixels>>,
+    },
     /// The HTTP server's contextual menu (§6.7), scoped to one root — the
     /// current directory from `^s` and the badge, any server's from the
     /// globe list's logs button.
@@ -1295,6 +1302,18 @@ fn pin_button(
         .compact(compact)
         .enabled(state != PinState::System)
         .on_click(cx.listener(move |this, _e, _w, cx| this.toggle_pin(&path, cx)))
+}
+
+/// One of the selected entry's verbs, as the detail bar and its overflow
+/// menu both see it: a glyph and a word for the button, a longer phrase
+/// for the menu row, and the action itself.
+struct DetailAction {
+    id: &'static str,
+    glyph: &'static str,
+    label: &'static str,
+    menu: &'static str,
+    enabled: bool,
+    act: ContextAction,
 }
 
 struct Explorer {
@@ -3346,6 +3365,23 @@ impl Explorer {
         cx.notify();
     }
 
+    /// The detail bar's `\u{2026}`: the verbs it had no room for.
+    fn open_detail_menu(
+        &mut self,
+        shown: usize,
+        position: Option<Point<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cursor().is_none() {
+            return;
+        }
+        self.overlay = Some(Overlay::DetailMenu { shown, position });
+        let owner = self.focus_handle_for(self.pane).clone();
+        window.focus(&owner, cx);
+        cx.notify();
+    }
+
     // ------------------------------------------------------------------ recent
     // -------------------------------------------------------------------- help
 
@@ -4791,16 +4827,15 @@ impl Render for Explorer {
 }
 
 impl Explorer {
-    /// The height both top bars share, so the rule under each meets the
-    /// other's across the vertical divider.
+    /// The height the three top bars share — one over each panel — so the
+    /// rule under each meets the others' across the vertical dividers.
     fn bar_height(space: &omarchy_tokens::Spacing) -> f32 {
         space.control_height() + space.sm() * 2.0
     }
 
-    /// The navigation bar over the listing and the detail panel: back, up,
-    /// and the path — click to edit. When the sidebar is hidden the tools
-    /// that live in its own bar ride here instead, so the mouse can still
-    /// reach them.
+    /// The navigation bar over the listing: back, up, and the path — click
+    /// to edit. When the sidebar is hidden the tools that live in its own
+    /// bar ride here instead, so the mouse can still reach them.
     fn nav_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let space = theme.space();
@@ -5026,26 +5061,32 @@ impl Explorer {
         };
         row = row.child(left).child(rule);
 
-        // The listing and the detail panel share one navigation bar; the
-        // sidebar has its own (on request), so the top of the window splits
-        // where the panes do.
-        let mut content = div().flex().flex_row().flex_1().min_h(px(0.));
+        // Each panel carries its own bar (on request): the sidebar its
+        // tools, the listing the navigation, the detail panel the entry's
+        // verbs — so the top of the window splits where the panes do.
+        let mut content = div().flex().flex_row().flex_1().min_w(px(0.)).min_h(px(0.));
         // The expanded preview takes the listing column *and* the detail panel,
         // because the panel was showing the same preview beside it — the same
         // title, the same facts, the same picture, twice. It leaves the sidebar
         // alone, which is what still makes this a pane rather than a modal: you
-        // can change directory without collapsing it.
+        // can change directory without collapsing it. Its bar replaces the
+        // navigation bar too: the way back is the one control it needs.
         if self.preview_expanded() {
             content = content.child(self.expanded_pane(cx));
         } else {
-            content = content.child(self.listing_pane(cx));
+            content = content.child(self.listing_column(cx));
             if !narrow && self.right_open {
                 content = content
                     .child(self.resize_handle(PanelSide::Right, cx))
-                    .child(self.detail_pane(cx));
+                    .child(self.detail_column(cx));
             }
         }
-        let main = div()
+        row.child(content).into_any_element()
+    }
+
+    /// The listing with the navigation bar on top.
+    fn listing_column(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        div()
             .flex()
             .flex_col()
             .flex_1()
@@ -5053,8 +5094,231 @@ impl Explorer {
             .min_h(px(0.))
             .child(self.nav_bar(cx))
             .child(Separator::horizontal())
-            .child(content);
-        row.child(main).into_any_element()
+            .child(self.listing_pane(cx))
+            .into_any_element()
+    }
+
+    /// The detail panel with its bar on top, the shape it takes docked or
+    /// floating.
+    fn detail_column(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let width = self.panel_width(PanelSide::Right, cx);
+        div()
+            .flex()
+            .flex_col()
+            .w(px(width))
+            .flex_shrink_0()
+            .h_full()
+            .child(self.detail_bar(cx))
+            .child(Separator::horizontal())
+            .child(self.detail_pane(cx))
+            .into_any_element()
+    }
+
+    /// The selected entry's verbs, in one order for the bar and the menu
+    /// and the mouse's counterpart to `⏎`/`a`/`s`. The most reached-for
+    /// come first, because the bar shows them from the left and drops the
+    /// rest into its menu: preview, open, copy path, copy, share, then the
+    /// verbs that change something. The directory's own actions live in
+    /// the status bar with the directory's facts.
+    fn detail_actions(&self) -> Vec<DetailAction> {
+        let Some(entry) = self.cursor().and_then(|i| self.listing()?.get(i)).cloned() else {
+            return Vec::new();
+        };
+        // The expand affordance, on the states §6.5 says can overflow.
+        // Present but disabled elsewhere, so the verbs keep their places.
+        let expandable = self
+            .preview
+            .as_ref()
+            .is_some_and(|l| l.preview.body.is_expandable());
+        let verb = |id, glyph, label, menu, enabled, act| DetailAction {
+            id,
+            glyph,
+            label,
+            menu,
+            enabled,
+            act,
+        };
+        let mut actions = vec![
+            verb(
+                "detail-preview",
+                "\u{f06e}", // nf-fa-eye
+                "Preview",
+                "Preview",
+                expandable,
+                Box::new(
+                    |this: &mut Explorer, _w: &mut Window, cx: &mut Context<Explorer>| {
+                        this.toggle_preview(cx)
+                    },
+                ) as ContextAction,
+            ),
+            verb(
+                "detail-open",
+                "\u{f08e}", // nf-fa-external_link
+                "Open",
+                "Open",
+                true,
+                Box::new(|this, _w, cx| this.open_selected(cx)),
+            ),
+            verb(
+                "detail-path",
+                "\u{f0c1}", // nf-fa-link
+                "Path",
+                "Copy path",
+                true,
+                Box::new(|this, _w, cx| this.copy_path_selected(cx)),
+            ),
+            verb(
+                "detail-copy",
+                "\u{f0c5}", // nf-fa-copy
+                "Copy",
+                "Copy",
+                true,
+                Box::new(|this, window, cx| this.copy_selected(window, cx)),
+            ),
+            verb(
+                "detail-share",
+                "\u{f1e0}", // nf-fa-share_alt
+                "Share",
+                "Share via LocalSend",
+                true,
+                Box::new(|this, _w, cx| this.share_selected(cx)),
+            ),
+            verb(
+                "detail-agent",
+                "\u{f06a9}", // nf-md-robot
+                "Agent",
+                "Ask the agent",
+                true,
+                Box::new(|this, window, cx| this.ask_agent(window, cx)),
+            ),
+            verb(
+                "detail-cut",
+                "\u{f0c4}", // nf-fa-scissors
+                "Cut",
+                "Cut",
+                true,
+                Box::new(|this, _w, cx| this.cut_selected(cx)),
+            ),
+            verb(
+                "detail-move",
+                "\u{f061}", // nf-fa-arrow_right
+                "Move",
+                "Move to\u{2026}",
+                true,
+                Box::new(|this, window, cx| this.move_selected(window, cx)),
+            ),
+            verb(
+                "detail-zip",
+                "\u{f1c6}", // nf-fa-file_archive
+                "Zip",
+                "Compress to zip",
+                true,
+                Box::new(|this, _w, cx| this.compress_selected(cx)),
+            ),
+            verb(
+                "detail-delete",
+                "\u{f1f8}", // nf-fa-trash
+                "Delete",
+                "Move to trash",
+                true,
+                Box::new(|this, window, cx| this.delete_selected(window, cx)),
+            ),
+        ];
+        // Directories additionally pin — a file cannot live in the sidebar.
+        if entry.kind.is_dir() {
+            let state = self.pin_state(&entry.path);
+            let label = if state == PinState::Pinned {
+                "Unpin"
+            } else {
+                "Pin"
+            };
+            let target = entry.path;
+            actions.push(verb(
+                "detail-pin",
+                "\u{f08d}", // nf-fa-thumb_tack
+                label,
+                label,
+                state != PinState::System,
+                Box::new(move |this, _w, cx| this.toggle_pin(&target, cx)),
+            ));
+        }
+        actions
+    }
+
+    /// The bar over the detail panel: the entry's verbs, as many as fit
+    /// from the left, and a borderless `\u{2026}` at the right edge opening
+    /// the rest as a menu when they do not all fit (on request).
+    fn detail_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let space = theme.space();
+        let inset = space.sm();
+        let height = Self::bar_height(space);
+        let caption = theme.type_scale().caption();
+        let dim = theme.dim_foreground();
+        // Glyphs alone unless the setting asks for the words; the verb is
+        // then a hover away.
+        let compact = !self.config.button_labels;
+        // What `ActionButton` will lay out, estimated from the monospace
+        // metrics rather than measured: the bar has to decide what fits
+        // before anything is laid out. Rounded up rather than down — a verb
+        // sent to the menu a little early costs a click, a bar that
+        // overflows its panel costs the resize grip.
+        let square = space.control_height() - space.md();
+        let border = theme.border_width().max(1.0) * 2.0;
+        let button_width = |label: &str| {
+            if compact {
+                square
+            } else {
+                space.md() * 2.0
+                    + border
+                    + caption * 1.2
+                    + space.control_gap()
+                    + caption * 0.66 * label.chars().count() as f32
+            }
+        };
+        let more_width = caption * ICON_COLUMN;
+        let room = self.panel_width(PanelSide::Right, cx) - inset * 2.0;
+
+        let actions = self.detail_actions();
+        let widths: Vec<f32> = actions.iter().map(|a| button_width(a.label)).collect();
+        let shown = leading_that_fit(&widths, inset, room, more_width);
+
+        let mut bar = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_shrink_0()
+            .h(px(height))
+            .gap(px(inset))
+            .p(px(inset))
+            .overflow_hidden();
+        let hidden = shown < actions.len();
+        for action in actions.into_iter().take(shown) {
+            let act = action.act;
+            bar = bar.child(
+                ActionButton::new(action.id)
+                    .glyph(action.glyph)
+                    .label(action.label)
+                    .compact(compact)
+                    .enabled(action.enabled)
+                    .on_click(cx.listener(move |this, _e, window, cx| act(this, window, cx))),
+            );
+        }
+        if hidden {
+            // Borderless, at the far right: it is about the bar itself, not
+            // one of the verbs, so it must not read as one more of them.
+            let more = quiet_button(
+                "detail-more",
+                "\u{f141}", // nf-fa-ellipsis_h
+                dim,
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    this.open_detail_menu(shown, Some(event.position()), window, cx)
+                }),
+                cx,
+            );
+            bar = bar.child(div().flex_1()).child(more);
+        }
+        bar.into_any_element()
     }
 
     /// A panel's width for this frame: the one the user dragged it to, or
@@ -5465,7 +5729,7 @@ impl Explorer {
             let inner = if left {
                 self.sidebar_column(cx)
             } else {
-                self.detail_pane(cx)
+                self.detail_column(cx)
             };
             let mut panel = div().flex().flex_row().h_full().bg(background);
             panel = if left {
@@ -5990,10 +6254,9 @@ impl Explorer {
         // Reduced from panel-padding: the info is a fact sheet, not a card.
         let pad = theme.space().row_padding_x();
         let pad_y = theme.space().md();
-        let (dim, caption, small_gap) = (
+        let (dim, caption) = (
             theme.dim_foreground_on(surface),
             theme.type_scale().caption(),
-            theme.space().sm(),
         );
         let width = self.panel_width(PanelSide::Right, cx);
 
@@ -6011,129 +6274,6 @@ impl Explorer {
                 .into_any_element(),
             (Some(loaded), _) => render_info(loaded, cx),
         };
-
-        // The expand affordance, on the states §6.5 says can overflow.
-        let expandable = self
-            .preview
-            .as_ref()
-            .is_some_and(|l| l.preview.body.is_expandable());
-
-        // The selected entry's actions, for the mouse (M9): the same verbs as
-        // `⏎`/`a`/`s`, beside the facts they act on. The directory's own
-        // actions live in the status bar with the directory's facts.
-        let entry = self.cursor().and_then(|i| self.listing()?.get(i)).cloned();
-        let selected = entry.is_some();
-        // Glyphs alone unless the setting asks for the words; the verb is
-        // then a hover away.
-        let compact = !self.config.button_labels;
-        let mut actions: Vec<ActionButton> = Vec::new();
-        if selected {
-            actions.push(
-                ActionButton::new("detail-open")
-                    .glyph("\u{f08e}") // nf-fa-external_link
-                    .label("Open")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, _w, cx| this.open_selected(cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-agent")
-                    .glyph("\u{f06a9}") // nf-md-robot
-                    .label("Agent")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, window, cx| this.ask_agent(window, cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-share")
-                    .glyph("\u{f1e0}") // nf-fa-share_alt
-                    .label("Share")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, _w, cx| this.share_selected(cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-copy")
-                    .glyph("\u{f0c5}") // nf-fa-copy
-                    .label("Copy")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, window, cx| this.copy_selected(window, cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-cut")
-                    .glyph("\u{f0c4}") // nf-fa-scissors
-                    .label("Cut")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, _w, cx| this.cut_selected(cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-path")
-                    .glyph("\u{f0c1}") // nf-fa-link
-                    .label("Path")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, _w, cx| this.copy_path_selected(cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-move")
-                    .glyph("\u{f061}") // nf-fa-arrow_right
-                    .label("Move")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, window, cx| this.move_selected(window, cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-zip")
-                    .glyph("\u{f1c6}") // nf-fa-file_archive
-                    .label("Zip")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, _w, cx| this.compress_selected(cx))),
-            );
-            actions.push(
-                ActionButton::new("detail-delete")
-                    .glyph("\u{f1f8}") // nf-fa-trash
-                    .label("Delete")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, window, cx| this.delete_selected(window, cx))),
-            );
-        }
-        // Directories additionally pin — a file cannot live in the sidebar.
-        if let Some(entry) = entry.as_ref().filter(|e| e.kind.is_dir()) {
-            let state = self.pin_state(&entry.path);
-            actions.push(pin_button(
-                "detail-pin",
-                entry.path.clone(),
-                state,
-                compact,
-                cx,
-            ));
-        }
-        // The expand affordance rides with the other verbs (on request).
-        if expandable {
-            actions.push(
-                ActionButton::new("preview-fullscreen")
-                    .glyph("\u{f06e}") // nf-fa-eye
-                    .label("Preview")
-                    .compact(compact)
-                    .on_click(cx.listener(|this, _e, _w, cx| this.toggle_preview(cx))),
-            );
-        }
-
-        // One wrapping row of verbs; too narrow for a line, it wraps tidily.
-        // Below the facts, behind its own rule (on request): the sheet reads
-        // top to bottom — cover, facts, then what can be done about them.
-        let toolbar = (selected || expandable).then(|| {
-            div()
-                .flex()
-                .flex_col()
-                .child(Separator::horizontal())
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .flex_wrap()
-                        .gap(px(small_gap))
-                        .px(px(pad))
-                        .py(px(pad_y))
-                        .children(actions),
-                )
-        });
 
         // The preview rides on top, flush to the panel edges like a cover,
         // with a rule between it and the fact sheet below (on request).
@@ -6161,38 +6301,31 @@ impl Explorer {
                     .into_any_element()
             });
 
+        // The verbs are in the bar above (on request); the sheet reads
+        // cover, then facts. Sized by the column it sits in.
         div()
-            .w(px(width))
-            .flex_shrink_0()
-            .h_full()
-            .child(
+            .id("detail-scroll")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .track_scroll(&self.right_scroll)
+            .children(cover.is_some().then(|| {
                 div()
-                    .id("detail-scroll")
                     .flex()
                     .flex_col()
-                    .h_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.right_scroll)
-                    .children(cover.is_some().then(|| {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .children(cover)
-                            .child(Separator::horizontal())
-                            .into_any_element()
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .px(px(pad))
-                            .py(px(pad_y))
-                            .child(content),
-                    )
-                    // In the flow rather than floating over the facts: an
-                    // absolutely-positioned control inside a scroll container
-                    // scrolls away with the content.
-                    .children(toolbar),
+                    .children(cover)
+                    .child(Separator::horizontal())
+                    .into_any_element()
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .px(px(pad))
+                    .py(px(pad_y))
+                    .child(content),
             )
             .into_any_element()
     }
@@ -7224,6 +7357,49 @@ impl Explorer {
 
                 menu_surround(name.clone(), rows, position, viewport, dismiss, cx)
             }
+            Overlay::DetailMenu { shown, position } => {
+                let (shown, position) = (*shown, *position);
+                let name = self
+                    .cursor()
+                    .and_then(|i| self.listing()?.get(i))
+                    .map(|e| e.name.clone())?;
+                let theme = cx.theme();
+                let (dim, faded, icon_w) = (
+                    theme.dim_foreground(),
+                    theme.dim_foreground().opacity(0.5),
+                    theme.type_scale().caption() * 1.6,
+                );
+
+                // The same list the bar drew from, starting where it
+                // stopped. Each dismisses first: the action may open its own
+                // modal, and it must not find this one standing.
+                let rows: Vec<AnyElement> = self
+                    .detail_actions()
+                    .into_iter()
+                    .skip(shown)
+                    .map(|action| {
+                        let mut row = Row::new(action.id)
+                            .child(
+                                div()
+                                    .w(px(icon_w))
+                                    .flex_shrink_0()
+                                    .text_color(if action.enabled { dim } else { faded })
+                                    .child(action.glyph),
+                            )
+                            .child(div().flex_1().child(action.menu));
+                        if action.enabled {
+                            let act = action.act;
+                            row = row.on_click(cx.listener(move |this, _e, window, cx| {
+                                this.dismiss_overlay(window, cx);
+                                act(this, window, cx);
+                            }));
+                        }
+                        row.into_any_element()
+                    })
+                    .collect();
+
+                menu_surround(name, rows, position, viewport, dismiss, cx)
+            }
             Overlay::Server { root: menu_root } => {
                 let menu_root = menu_root.clone();
                 let theme = cx.theme();
@@ -7488,11 +7664,12 @@ impl Explorer {
     /// for.
     fn expanded_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (caption, dim, small_gap, gap) = (
+        let (caption, dim, inset, gap, height) = (
             theme.type_scale().caption(),
             theme.dim_foreground(),
             theme.space().sm(),
             theme.space().xl(),
+            Self::bar_height(theme.space()),
         );
         // Text-like bodies sit on the sunken ground, and the *pane* paints it
         // so it reaches the bottom edge even when the file does not. On the
@@ -7522,7 +7699,7 @@ impl Explorer {
                 .into_any_element(),
         };
 
-        // The one fact that survives, and it goes in the footer rather than over
+        // The one fact that survives, and it goes in the bar rather than over
         // the body: with the title gone and the listing replaced, nothing on
         // screen would say which file `j`/`k` had landed on.
         let name = self
@@ -7539,35 +7716,52 @@ impl Explorer {
             .min_w(px(0.))
             .min_h(px(0.))
             .child(
-                // The instruction bar rides on top (on request): the file's
-                // name, the keys, and the way back — then the rule, then the
-                // body filling everything below.
+                // This pane's own bar, standing in for the navigation bar
+                // (on request): the way back where back always is, then the
+                // file's name and the keys — then the rule, then the body
+                // filling everything below.
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .justify_between()
-                    .gap(px(gap))
-                    .p(px(small_gap))
-                    .text_size(px(caption))
-                    .text_color(dim)
-                    // The name yields first: a long one must not push the way
-                    // out off the edge of the window.
-                    .child(div().flex_1().min_w(px(0.)).overflow_hidden().child(name))
-                    .child("j / k  next \u{00b7} previous")
-                    // From the keymap, not a literal: rebinding space (M11)
-                    // must not leave this hint promising a key that no longer
-                    // does it.
-                    .child({
-                        let mut keys = vec!["esc".to_string()];
-                        keys.extend(self.keymap.keys_for("toggle_preview"));
-                        format!("{}  collapse", keys.join(" / "))
-                    })
+                    .flex_shrink_0()
+                    .h(px(height))
+                    .gap(px(inset))
+                    .p(px(inset))
                     .child(
-                        ActionButton::new("preview-close")
-                            .glyph("\u{f00d}") // nf-fa-times
-                            .label("Close")
+                        ActionButton::new("preview-back")
+                            .glyph("\u{f060}") // nf-fa-arrow_left
+                            .label("Back")
+                            .compact(true)
                             .on_click(cx.listener(|this, _e, _w, cx| this.toggle_preview(cx))),
+                    )
+                    // The name yields first: a long one must not push the
+                    // keys off the edge of the window.
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .text_size(px(caption))
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_shrink_0()
+                            .gap(px(gap))
+                            .text_size(px(caption))
+                            .text_color(dim)
+                            .child("j / k  next \u{00b7} previous")
+                            // From the keymap, not a literal: rebinding space
+                            // (M11) must not leave this hint promising a key
+                            // that no longer does it.
+                            .child({
+                                let mut keys = vec!["esc".to_string()];
+                                keys.extend(self.keymap.keys_for("toggle_preview"));
+                                format!("{}  back", keys.join(" / "))
+                            }),
                     ),
             )
             .child(Separator::horizontal())
@@ -7992,6 +8186,31 @@ fn drop_header(
 /// A borderless glyph button for a sidebar header — like a tab row's `×`,
 /// not an `ActionButton`: in a header a hairline outline reads as a form
 /// control.
+/// How many of a row of widths, `gap` apart, fit in `room`: all of them
+/// when they all do, else the leading ones that fit beside a `tail` (the
+/// bar's menu button) which then stands for the rest.
+fn leading_that_fit(widths: &[f32], gap: f32, room: f32, tail: f32) -> usize {
+    let total = widths.iter().sum::<f32>() + gap * widths.len().saturating_sub(1) as f32;
+    if total <= room {
+        return widths.len();
+    }
+    let mut used = 0.0;
+    let mut count = 0;
+    for width in widths {
+        let need = if count == 0 {
+            *width
+        } else {
+            used + gap + width
+        };
+        if need + gap + tail > room {
+            break;
+        }
+        used = need;
+        count += 1;
+    }
+    count
+}
+
 fn quiet_button(
     id: impl Into<gpui::ElementId>,
     glyph: &'static str,
@@ -8974,6 +9193,28 @@ mod chrome_tests {
         assert_eq!(reasons.len(), 1);
         assert!(reasons[0].contains("not a directory"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_verb_fits_when_the_bar_is_wide_enough() {
+        // Three of 20 and two gaps of 4: 68 exactly.
+        assert_eq!(leading_that_fit(&[20., 20., 20.], 4., 68., 16.), 3);
+    }
+
+    #[test]
+    fn a_narrow_bar_keeps_the_leading_verbs_and_room_for_the_menu() {
+        // 67 is one short of all three; two (44) plus a gap and the tail
+        // (64) fit, three would not even without the tail.
+        assert_eq!(leading_that_fit(&[20., 20., 20.], 4., 67., 16.), 2);
+        // The tail is charged even when the verbs alone would have fit:
+        // two verbs and the tail need 64, so 60 shows only one.
+        assert_eq!(leading_that_fit(&[20., 20., 20.], 4., 60., 16.), 1);
+    }
+
+    #[test]
+    fn a_bar_too_narrow_for_any_verb_shows_only_the_menu() {
+        assert_eq!(leading_that_fit(&[20., 20.], 4., 30., 16.), 0);
+        assert_eq!(leading_that_fit(&[], 4., 30., 16.), 0);
     }
 
     #[test]
