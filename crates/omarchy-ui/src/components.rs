@@ -424,6 +424,34 @@ impl ActionButton {
         self.on_click = Some(Box::new(handler));
         self
     }
+
+    /// What this button will lay out, estimated from the monospace metrics
+    /// rather than measured — for a bar that has to decide what fits before
+    /// anything is laid out ([`crate::ActionBar`]). Rounded up rather than
+    /// down: a verb sent to the menu a little early costs a click, a bar
+    /// that overflows its panel costs the resize grip.
+    pub fn estimated_width(&self, theme: &crate::Theme) -> f32 {
+        let space = theme.space();
+        let square = space.control_height() - space.md();
+        let label = if self.compact {
+            None
+        } else {
+            self.label.as_ref()
+        };
+        match label {
+            None if self.children.is_empty() => square,
+            _ => {
+                let caption = theme.type_scale().caption();
+                let border = theme.border_width().max(1.0) * 2.0;
+                let chars = label.map_or(0, |l| l.chars().count()) as f32;
+                space.md() * 2.0
+                    + border
+                    + caption * 1.2
+                    + space.control_gap()
+                    + caption * 0.66 * chars
+            }
+        }
+    }
 }
 
 impl ParentElement for ActionButton {
@@ -564,7 +592,7 @@ impl Render for Hint {
 ///
 /// `on_drag`/`on_drop` are generic over the payload, which cannot be named in a
 /// struct field — so the builder stores the *application* of the call instead.
-type ElementAdapter = Box<dyn FnOnce(Stateful<Div>) -> Stateful<Div>>;
+pub(crate) type ElementAdapter = Box<dyn FnOnce(Stateful<Div>) -> Stateful<Div>>;
 
 /// What a button is for, which decides how loudly it draws itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -717,31 +745,57 @@ impl RenderOnce for Separator {
 }
 
 /// A small uppercase label above a group — "PLACES", "PINNED".
+///
+/// Optionally with a control at its right edge — a section's own "new"
+/// verb — set with [`SectionHeader::trailing`]. That is a [`QuietButton`]
+/// by convention: in a header a hairline outline reads as a form control.
 #[derive(IntoElement)]
 pub struct SectionHeader {
     label: SharedString,
+    trailing: Option<AnyElement>,
 }
 
 impl SectionHeader {
     pub fn new(label: impl Into<SharedString>) -> Self {
         Self {
             label: label.into(),
+            trailing: None,
         }
+    }
+
+    /// A control at the header's right edge, inset like the rows below it.
+    pub fn trailing(mut self, element: impl IntoElement) -> Self {
+        self.trailing = Some(element.into_any_element());
+        self
     }
 }
 
 impl RenderOnce for SectionHeader {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        div()
-            .px(px(theme.space().row_padding_x()))
+        let pad_x = theme.space().row_padding_x();
+        let label = div()
+            .px(px(pad_x))
             .pt(px(theme.space().sm()))
             .pb(px(theme.space().xxs()))
             .text_size(px(theme.type_scale().caption()))
             // On a filled panel, secondary text needs the panel's colour to
             // measure against, not the window's.
             .text_color(theme.dim_foreground_on(theme.tokens.palette.lighter_background()))
-            .child(self.label.to_uppercase())
+            .child(self.label.to_uppercase());
+        match self.trailing {
+            None => label.into_any_element(),
+            Some(trailing) => div()
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .pr(px(pad_x))
+                .child(div().flex_1().min_w(px(0.)).child(label))
+                .child(trailing)
+                .into_any_element(),
+        }
     }
 }
 
@@ -885,5 +939,266 @@ impl RenderOnce for Breadcrumb {
                         parts
                     }),
             )
+    }
+}
+
+/// A glyph in the column before a row's label: the folder before a place,
+/// the file before an entry. [`crate::Theme::icon_column`] wide, so the
+/// labels after it line up down the list, and secondary-coloured unless
+/// told otherwise — the glyph decorates the row, it is not the row.
+///
+/// Can carry a small [`badge`](Icon::badge) on its corner: what git thinks
+/// of a file, composited onto the icon that says what the file is.
+#[derive(IntoElement)]
+pub struct Icon {
+    glyph: SharedString,
+    color: Option<gpui::Hsla>,
+    badge: Option<(SharedString, gpui::Hsla)>,
+}
+
+impl Icon {
+    pub fn new(glyph: impl Into<SharedString>) -> Self {
+        Self {
+            glyph: glyph.into(),
+            color: None,
+            badge: None,
+        }
+    }
+
+    /// A colour other than the secondary foreground — the accent on the
+    /// cursor row, say. Scarce by design.
+    pub fn color(mut self, color: gpui::Hsla) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    /// A smaller glyph on the icon's bottom-right corner, just outside the
+    /// glyph box so it never lands on a descender.
+    pub fn badge(mut self, glyph: impl Into<SharedString>, color: gpui::Hsla) -> Self {
+        self.badge = Some((glyph.into(), color));
+        self
+    }
+}
+
+impl RenderOnce for Icon {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let caption = theme.type_scale().caption();
+        div()
+            .relative()
+            .w(px(theme.icon_column()))
+            .flex_shrink_0()
+            .text_color(self.color.unwrap_or_else(|| theme.dim_foreground()))
+            .child(self.glyph)
+            .children(self.badge.map(|(glyph, color)| {
+                div()
+                    .absolute()
+                    .right(px(-2.))
+                    .bottom(px(-2.))
+                    .text_size(px(caption * 0.85))
+                    .text_color(color)
+                    .child(glyph)
+            }))
+    }
+}
+
+/// A row's text: takes the width the icon and the trailing columns leave,
+/// and truncates rather than pushing them off the row.
+#[derive(IntoElement)]
+pub struct RowLabel {
+    text: SharedString,
+}
+
+impl RowLabel {
+    pub fn new(text: impl Into<SharedString>) -> Self {
+        Self { text: text.into() }
+    }
+}
+
+impl RenderOnce for RowLabel {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        div().flex_1().min_w(px(0.)).truncate().child(self.text)
+    }
+}
+
+/// A borderless glyph button — a section header's "new", a tab row's `×`,
+/// a bar's collapse. Not an [`ActionButton`]: inside a row or a header a
+/// hairline outline reads as a form control, and a bar's own controls must
+/// not read as one more of its verbs.
+///
+/// A click never reaches the row underneath: closing a tab must not also
+/// switch to it.
+#[derive(IntoElement)]
+pub struct QuietButton {
+    id: ElementId,
+    glyph: SharedString,
+    color: Option<gpui::Hsla>,
+    revealed_by_row: bool,
+    on_click: Option<ClickHandler>,
+}
+
+impl QuietButton {
+    pub fn new(id: impl Into<ElementId>, glyph: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            glyph: glyph.into(),
+            color: None,
+            revealed_by_row: false,
+            on_click: None,
+        }
+    }
+
+    /// The idle colour. Defaults to the secondary foreground.
+    pub fn color(mut self, color: gpui::Hsla) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    /// Invisible until the pointer is on the [`Row`] it sits in — the
+    /// close box of a tab. Invisible rather than absent, so revealing it
+    /// never shifts the label beside it.
+    pub fn revealed_by_row(mut self) -> Self {
+        self.revealed_by_row = true;
+        self
+    }
+
+    pub fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for QuietButton {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let caption = theme.type_scale().caption();
+        let size = theme.icon_column();
+        let (hover_fill, bright, radius) = (
+            theme.hover_fill(),
+            theme.bright_foreground(),
+            theme.radius(),
+        );
+        let color = self.color.unwrap_or_else(|| theme.dim_foreground());
+        let mut button = div()
+            .id(self.id)
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .w(px(size))
+            .h(px(size))
+            .rounded(px(radius.min(2.0)))
+            .text_size(px(caption))
+            .text_color(color)
+            .hover(move |style| style.bg(hover_fill).text_color(bright))
+            .child(self.glyph);
+        if self.revealed_by_row {
+            button = button
+                .invisible()
+                .group_hover(ROW_GROUP, |style| style.visible());
+        }
+        if let Some(handler) = self.on_click {
+            button = button.on_click(move |event, window, cx| {
+                cx.stop_propagation();
+                handler(event, window, cx);
+            });
+        }
+        button
+    }
+}
+
+/// A row that is an affordance rather than an item — "New tab", "Add
+/// location": faint until the pointer is on it, so it reads as a place to
+/// click and not as one more entry in the list above.
+#[derive(IntoElement)]
+pub struct QuietRow {
+    id: ElementId,
+    glyph: SharedString,
+    label: SharedString,
+    on_click: Option<ClickHandler>,
+}
+
+impl QuietRow {
+    pub fn new(
+        id: impl Into<ElementId>,
+        glyph: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            glyph: glyph.into(),
+            label: label.into(),
+            on_click: None,
+        }
+    }
+
+    pub fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for QuietRow {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let width = cx.theme().icon_column();
+        let mut row = Row::new(self.id)
+            .focused(true)
+            // The row's own text colour, not the icon's secondary one: at
+            // 0.3 opacity a dim glyph vanishes.
+            .child(div().w(px(width)).flex_shrink_0().child(self.glyph))
+            .child(RowLabel::new(self.label));
+        if let Some(handler) = self.on_click {
+            row = row.on_click(handler);
+        }
+        div()
+            .opacity(0.3)
+            .hover(|style| style.opacity(1.0))
+            .child(row)
+    }
+}
+
+/// What a pane shows instead of a list — "nothing here", "reading…", "no
+/// selection": one line of secondary text, centred in the space the list
+/// would take.
+#[derive(IntoElement)]
+pub struct EmptyState {
+    text: SharedString,
+    caption: bool,
+}
+
+impl EmptyState {
+    pub fn new(text: impl Into<SharedString>) -> Self {
+        Self {
+            text: text.into(),
+            caption: false,
+        }
+    }
+
+    /// At caption size — for a small pane, where body text would shout.
+    pub fn caption(mut self) -> Self {
+        self.caption = true;
+        self
+    }
+}
+
+impl RenderOnce for EmptyState {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let mut state = div()
+            .flex()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .text_color(theme.dim_foreground());
+        if self.caption {
+            state = state.text_size(px(theme.type_scale().caption()));
+        }
+        state.child(self.text)
     }
 }

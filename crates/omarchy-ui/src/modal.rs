@@ -14,7 +14,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled, Window, div, px,
 };
 
-use crate::{ActiveTheme as _, KeyHint, Separator, color};
+use crate::{ActiveTheme as _, KeyHint, Separator};
 
 /// Named because the boxed closure type is unreadable inline.
 type DismissHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -103,7 +103,6 @@ impl RenderOnce for Modal {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let space = theme.space();
-        let menu = &theme.tokens.surfaces.menu;
 
         // Hung from the top rather than centred: a palette whose result list
         // grows and shrinks as you type would otherwise bounce around the
@@ -117,14 +116,9 @@ impl RenderOnce for Modal {
             ModalSize::Small => space.searchable_dropdown_width() * 2.0,
             ModalSize::Large => space.searchable_dropdown_width() * 3.0,
         };
-        let card_background = color(menu.background).opacity(menu.background_alpha);
-        let border = color(menu.border).opacity(menu.border_alpha);
-        // `darker_background`, not `background`: the shell draws its scrim over
-        // the desktop, but ours sits over a window already painted in
-        // `background` — using the same colour makes the scrim invisible. This
-        // is darker than the window on every theme in the corpus, light ones
-        // included, because Omarchy derives it as a mix toward black.
-        let scrim = color(theme.tokens.palette.darker_background()).opacity(0.72);
+        let card_background = theme.menu_background();
+        let border = theme.menu_border();
+        let scrim = theme.scrim(0.72);
 
         // The card carries no padding of its own — each section does. That is
         // what lets the rules between sections, and the ones between a list's

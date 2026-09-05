@@ -1,6 +1,6 @@
 [package]
 name = "omarchy-ui"
-description = "An Omarchy design system for gpui: live theme tokens and a component kit."
+description = "An Omarchy design system for gpui: live theme tokens, a component kit, and the workbench layout."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -4,32 +4,105 @@
 //! `Commons/Color.qml`, so an app built on this crate reads as part of the same
 //! desktop as the bar and the menu rather than merely themed to match.
 //!
-//! M1 scope: the [`Theme`] global, colour conversion, the subscription helper,
-//! and live tracking of the system theme. M2 adds `InteractiveSurface` and the
-//! component kit.
+//! Three layers, from the bottom up:
+//!
+//! - **Tokens.** The [`Theme`] global, colour conversion, [`observe_theme`], and
+//!   live tracking of the system theme.
+//! - **Components.** [`InteractiveSurface`] and the kit built on it: rows,
+//!   buttons, bars, headers, modals, menus, sheets.
+//! - **Layout.** [`Workbench`] — the three-column shell with collapsible,
+//!   resizable side panels, a status bar and an overlay layer — and the
+//!   [`Panels`] entity that holds its state.
+//!
+//! An app starts with [`init`] and [`window_options`], renders a
+//! [`Workbench`] from its root view, and fills the panels with the components.
+//! `examples/workbench.rs` is that skeleton in fifty lines of layout.
 
 use futures::StreamExt as _;
 use gpui::{App, Global, Hsla, Rgba};
 use omarchy_tokens::{ControlStates, Rgb, Spacing, Surfaces, Tokens, Typography};
 
+mod bars;
+mod columns;
 mod components;
 mod contrast;
+mod drag;
 mod interactive;
 mod interop;
+mod menu;
 mod modal;
+mod scroll;
+mod sheets;
 mod syntax;
+mod toolbar;
+mod workbench;
 
+pub use bars::{Bar, StatusBar, spacer};
+pub use columns::{Column, ColumnHeader, ColumnResize, GripEvent, SortEvent};
 pub use components::{
-    ActionButton, Badge, BadgeTone, Breadcrumb, Button, ButtonKind, Hint, KeyHint, Panel,
-    ROW_GROUP, Row, SectionHeader, Separator,
+    ActionButton, Badge, BadgeTone, Breadcrumb, Button, ButtonKind, EmptyState, Hint, Icon,
+    KeyHint, Panel, QuietButton, QuietRow, ROW_GROUP, Row, RowLabel, SectionHeader, Separator,
 };
 pub use contrast::{
     MIN_PRIMARY_CONTRAST, MIN_SECONDARY_CONTRAST, best_of, contrast_ratio, ensure_contrast,
 };
+pub use drag::{DragLabel, drag_label, drop_highlight};
 pub use interactive::{Chrome, InteractiveSurface, SurfaceState};
 pub use interop::sync_gpui_component;
+pub use menu::{ContextMenu, GroupHeader, modal_inset, separated};
 pub use modal::{Modal, ModalSize};
+pub use scroll::ScrollArea;
+pub use sheets::{FactSheet, ShortcutGroup, ShortcutSheet, filter_shortcuts};
 pub use syntax::SyntaxPalette;
+pub use toolbar::{ActionBar, OverflowEvent, leading_that_fit};
+pub use workbench::{PanelSide, Panels, PanelsEvent, SidePanel, Workbench};
+
+/// Everything an app needs before it opens a window: the [`Theme`] global
+/// with its watcher, `gpui-component`'s own theme (for the scrollbar and the
+/// text input), and the bridge that keeps the second in step with the first
+/// on every theme change.
+///
+/// ```ignore
+/// gpui_platform::application().run(|cx: &mut App| {
+///     omarchy_ui::init(cx);
+///     cx.open_window(omarchy_ui::window_options("dev.example.app", "App"), |window, cx| {
+///         cx.new(|cx| Root::new(window, cx))
+///     })
+///     .expect("open window");
+///     cx.activate(true);
+/// });
+/// ```
+pub fn init(cx: &mut App) {
+    Theme::install(cx);
+    gpui_component::init(cx);
+    let tokens = cx.theme().tokens.clone();
+    sync_gpui_component(&tokens, cx);
+    // Detached: the observer's lifetime is the app's. Without this the
+    // scrollbar and the input would keep the palette the app started with.
+    cx.observe_global::<Theme>(|cx| {
+        let tokens = cx.theme().tokens.clone();
+        sync_gpui_component(&tokens, cx);
+    })
+    .detach();
+}
+
+/// The window an Omarchy app opens: server decorations, so Hyprland draws
+/// the border it draws for everything else, and a transparent background, so
+/// Hyprland's own blur shows through the translucent ground [`Workbench`]
+/// paints. gpui's own blur is a no-op on Hyprland; this is the route that
+/// works (`PLAN.md` §5).
+pub fn window_options(app_id: &str, title: &str) -> gpui::WindowOptions {
+    gpui::WindowOptions {
+        app_id: Some(app_id.to_string()),
+        titlebar: Some(gpui::TitlebarOptions {
+            title: Some(title.to_string().into()),
+            ..Default::default()
+        }),
+        window_decorations: Some(gpui::WindowDecorations::Server),
+        window_background: gpui::WindowBackgroundAppearance::Transparent,
+        ..Default::default()
+    }
+}
 
 /// Ergonomic access to the [`Theme`] global.
 ///
@@ -194,6 +267,50 @@ impl Theme {
     /// Half of Hyprland's `general:gaps_out`, matching the shell.
     pub fn gap(&self) -> f32 {
         self.tokens.geometry.gaps_out
+    }
+
+    /// The width of a glyph column — the icon before a row's label, a
+    /// borderless glyph button. A multiple of the caption size, so it scales
+    /// with `omarchy display text size` like everything else.
+    pub fn icon_column(&self) -> f32 {
+        self.type_scale().caption() * 1.6
+    }
+
+    /// The height every top bar shares — one over each panel — so the rule
+    /// under each meets the others' across the vertical dividers.
+    pub fn bar_height(&self) -> f32 {
+        let space = self.space();
+        space.control_height() + space.sm() * 2.0
+    }
+
+    /// The window's ground: the background, slightly translucent, so a
+    /// Hyprland blur rule shows through. See [`window_options`].
+    pub fn window_background(&self) -> Hsla {
+        self.background().opacity(0.94)
+    }
+
+    /// The dimming layer under a modal or a floating panel.
+    ///
+    /// `darker_background`, not `background`: the shell draws its scrim over
+    /// the desktop, but ours sits over a window already painted in
+    /// `background` — using the same colour makes the scrim invisible. This
+    /// is darker than the window on every theme in the corpus, light ones
+    /// included, because Omarchy derives it as a mix toward black.
+    pub fn scrim(&self, alpha: f32) -> Hsla {
+        color(self.tokens.palette.darker_background()).opacity(alpha)
+    }
+
+    /// The menu surface's fill — what a modal card and a context menu are
+    /// painted in, from `[menu]` in `shell.toml`.
+    pub fn menu_background(&self) -> Hsla {
+        let menu = &self.tokens.surfaces.menu;
+        color(menu.background).opacity(menu.background_alpha)
+    }
+
+    /// The menu surface's edge.
+    pub fn menu_border(&self) -> Hsla {
+        let menu = &self.tokens.surfaces.menu;
+        color(menu.border).opacity(menu.border_alpha)
     }
 
     // ---------------------------------------------------------- palette roles

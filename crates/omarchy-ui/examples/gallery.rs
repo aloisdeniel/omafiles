@@ -21,28 +21,20 @@
 
 use gpui::{
     App, AppContext as _, Context, IntoElement, ParentElement, Render, Styled, Subscription,
-    TitlebarOptions, Window, WindowDecorations, WindowOptions, div, px,
+    Window, div, px,
 };
 use omarchy_ui::{
-    ActionButton, ActiveTheme as _, Badge, Breadcrumb, Button, ButtonKind, Chrome,
-    InteractiveSurface, KeyHint,
-    Panel, Row, SectionHeader, Separator, SurfaceState, Theme,
+    ActionButton, ActiveTheme as _, Badge, Bar, Breadcrumb, Button, ButtonKind, Chrome, Column,
+    ColumnHeader, EmptyState, FactSheet, GroupHeader, Icon, InteractiveSurface, KeyHint, Panel,
+    QuietButton, QuietRow, Row, RowLabel, SectionHeader, Separator, StatusBar, SurfaceState,
+    spacer,
 };
 
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
-        Theme::install(cx);
-
-        let options = WindowOptions {
-            app_id: Some("dev.omarchy.omafiles.gallery".to_string()),
-            titlebar: Some(TitlebarOptions {
-                title: Some("omarchy-ui gallery".into()),
-                ..Default::default()
-            }),
-            window_decorations: Some(WindowDecorations::Server),
-            ..Default::default()
-        };
-
+        omarchy_ui::init(cx);
+        let options =
+            omarchy_ui::window_options("dev.omarchy.omafiles.gallery", "omarchy-ui gallery");
         cx.open_window(options, |_window, cx| cx.new(Gallery::new))
             .expect("failed to open window");
         cx.activate(true);
@@ -108,7 +100,14 @@ impl Render for Gallery {
                     .child(states_panel(cx))
                     .child(controls_panel(cx)),
             )
-            .child(rows_panel(cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(gap))
+                    .child(rows_panel(cx))
+                    .child(chrome_panel(cx)),
+            )
             .child(scale_panel(cx))
             .child(
                 div()
@@ -219,7 +218,11 @@ fn controls_panel(cx: &mut App) -> impl IntoElement {
             // The quiet chrome verbs: every small action button in the app is
             // one of these, in exactly these states.
             .child(ActionButton::new("act-icon").glyph("\u{f062}"))
-            .child(ActionButton::new("act-disabled").glyph("\u{f060}").enabled(false))
+            .child(
+                ActionButton::new("act-disabled")
+                    .glyph("\u{f060}")
+                    .enabled(false),
+            )
             .child(
                 ActionButton::new("act-labelled")
                     .glyph("\u{f120}")
@@ -269,6 +272,83 @@ fn rows_panel(cx: &mut App) -> impl IntoElement {
                             )
                     },
                 )),
+        )
+}
+
+/// The chrome pieces an app is assembled from: a bar, a column header, a
+/// section with a trailing verb, a group header, quiet rows and buttons, a
+/// fact sheet, an empty state, a status bar. What `examples/workbench.rs`
+/// puts together into a window, shown here piece by piece.
+fn chrome_panel(cx: &mut App) -> impl IntoElement {
+    let theme = cx.theme();
+    let icon = theme.icon_column();
+    let accent = theme.accent();
+    let dim = theme.dim_foreground();
+    Panel::new()
+        .flush()
+        .child(SectionHeader::new("chrome").trailing(QuietButton::new("section-new", "\u{f067}")))
+        .child(
+            Bar::new()
+                .child(
+                    ActionButton::new("bar-back")
+                        .glyph("\u{f060}")
+                        .enabled(false),
+                )
+                .child(ActionButton::new("bar-up").glyph("\u{f062}"))
+                .child(Breadcrumb::new(["~", "src"]))
+                .child(spacer())
+                .child(QuietButton::new("bar-collapse", "\u{f100}")),
+        )
+        .child(Separator::horizontal())
+        .child(
+            ColumnHeader::new()
+                .leading(icon)
+                .column(Column::flex("name"))
+                .column(Column::fixed("size", 72.))
+                .column(Column::fixed("age", 48.))
+                .sorted(0, false),
+        )
+        .child(Separator::horizontal())
+        .child(
+            Row::new("chrome-row")
+                .cursor(true)
+                .focused(true)
+                .child(Icon::new("\u{f07b}").color(accent).badge("M", dim))
+                .child(RowLabel::new("a row: icon with a badge, then its label"))
+                .child(QuietButton::new("row-close", "\u{f00d}").revealed_by_row()),
+        )
+        .child(
+            GroupHeader::new("group", "a group")
+                .active(true)
+                .trailing(QuietButton::new("group-menu", "\u{f141}")),
+        )
+        .child(QuietRow::new("quiet", "\u{f067}", "New tab"))
+        .child(Separator::horizontal())
+        .child(
+            div().p(px(theme.space().md())).child(
+                FactSheet::new()
+                    .title("Cargo.toml")
+                    .fact("kind", "toml")
+                    .fact("size", "412 B"),
+            ),
+        )
+        .child(Separator::horizontal())
+        .child(
+            div()
+                .h(px(theme.space().control_height() * 2.))
+                .flex()
+                .child(EmptyState::new("nothing here")),
+        )
+        .child(Separator::horizontal())
+        .child(
+            StatusBar::new()
+                .leading(div().child("3 directories · 9 files"))
+                .trailing(
+                    ActionButton::new("status-terminal")
+                        .glyph("\u{f120}")
+                        .label("Terminal"),
+                )
+                .trailing(ActionButton::new("status-help").glyph("?").label("Help")),
         )
 }
 

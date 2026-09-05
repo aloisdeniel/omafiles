@@ -82,7 +82,7 @@ A Rust workspace of three crates:
 | Crate | Role |
 | --- | --- |
 | `omarchy-tokens` | Reads Omarchy's theme into typed tokens. Conformance-tested against Omarchy's own tooling on every stock theme. |
-| `omarchy-ui` | A small gpui design system built from those tokens: rows, buttons, modals, badges. |
+| `omarchy-ui` | A gpui design system built from those tokens: the components (rows, bars, buttons, headers, modals, menus, sheets) and the layout — a three-column workbench with collapsible, resizable side panels. `cargo run -p omarchy-ui --example workbench` is the skeleton of a new app; `--example gallery` shows every component. |
 | `omafiles` | The explorer. |
 
 ```sh

@@ -1951,3 +1951,26 @@ like Home, which is permanently in the sidebar), toggling through the same `Plac
 machinery as `^p`. And **the server badge moved into the status bar's right-corner
 action cluster** — it is an action whose label happens to also be its state, so it
 belongs with the verbs rather than with the directory facts on the left.
+
+**The layout moved into `omarchy-ui`** (2026-09-05, on request — so another app can
+be built with the same shape and the same grammar). What was the explorer's private
+chrome is now the crate's: a `Workbench` renders the three columns, each side panel
+under its own `Bar`, the status bar, the overlay layer and the floating panels of a
+narrow window, and a `Panels` entity holds their state — open or collapsed, docked or
+floating, dragged widths, the edge under the pointer — so the workbench's own collapse
+buttons, strips, grips and scrims update it directly and the app only observes it and
+writes the width down on `PanelsEvent::Resized`. Around it, the pieces the explorer
+was assembling by hand became components: `Bar` and `StatusBar`; `ColumnHeader` with
+its sort carets and grips, and `ColumnResize` for the width trading (tested); `ActionBar`,
+which folds verbs into a `…` menu when the panel is too narrow; `ContextMenu` (a card at
+the pointer or a modal for the keyboard route); `GroupHeader` for a collapsible,
+droppable group; `Icon`, `RowLabel`, `QuietButton`, `QuietRow`, `EmptyState`;
+`FactSheet` and `ShortcutSheet` (the searchable help page); `ScrollArea`; `DragLabel`
+and `drop_highlight`; and `SectionHeader` grew a trailing slot. `omarchy_ui::init` does
+the whole bootstrap — theme, `gpui-component`, and the bridge that re-syncs it on every
+theme change, which the explorer used to do in its own observer — and
+`window_options` the window. `examples/workbench.rs` is a complete app skeleton in a
+few hundred lines: bars, a listing with a column header, a detail sheet, a modal, and
+the panels — copy it to start one. `main.rs` lost about eight hundred lines, and the
+handler shape is gpui's own (`cx.listener` with `&SortEvent`, `&GripEvent`,
+`&OverflowEvent`), so nothing about wiring a component is new to learn.
