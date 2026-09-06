@@ -76,6 +76,9 @@ serde_json = "1"
 toml = "1"
 notify = "8"
 futures = "0.3"
+# The glow texture omarchy-ui/src/reveal.rs builds is a gpui `RenderImage`,
+# whose frames are this crate's type; the version floats with gpui's.
+image = { version = "0.25", default-features = false }
 nucleo = "0.5"
 ignore = "0.4"
 

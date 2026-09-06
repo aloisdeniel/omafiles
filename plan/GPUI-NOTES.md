@@ -334,6 +334,22 @@ entire widget set.
 **These three gaps — text input, scrollbar, context menu — are why `PLAN.md` leans
 toward adopting gpui-component** despite everything in §1.
 
+### Pointer-lit effects (Fluent "reveal") — assembled, not native
+
+There is no radial gradient (`Background` is solid, a **two-stop** linear gradient, or
+a slash pattern), no custom shader hook, no filter, and a quad's border colour is one
+flat `Hsla`. What exists: `window.mouse_position()` at paint time, `paint_image` with
+**corner radii as a rounded clip** (the only rounded clip in gpui — `ContentMask` is
+rectangular), `paint_quad` with a gradient fill, and `window.on_mouse_event` from an
+element's `paint`. `omarchy_ui::reveal` builds Fluent's two effects from those: the
+hover glow is a 96px radial texture built on the CPU (BGRA, straight alpha —
+`blend_color` premultiplies in the shader) painted through `paint_image` positioned on
+the pointer and clipped to the element; the lit border is twelve quads (two gradient
+runs per edge, split at the pointer's projection, plus a solid arc per corner). gpui
+only redraws on a hover *change*, so each wrapper registers a mouse-move listener and
+calls `window.refresh()` while the pointer is in its zone. A true radial gradient would
+be a small `BackgroundTag` + shader addition in a fork — not taken, for the reasons in §1.
+
 ### Platform services already on `App` (no crate needed)
 
 `reveal_path`, `open_with_system` (shells `xdg-open`), `prompt_for_paths` /

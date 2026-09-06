@@ -4625,6 +4625,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui_platform",
+ "image",
  "omarchy-tokens",
  "serde_json",
 ]

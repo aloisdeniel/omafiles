@@ -16,7 +16,7 @@ use gpui::{
     px,
 };
 
-use crate::{ActiveTheme as _, Chrome, InteractiveSurface, SurfaceState};
+use crate::{ActiveTheme as _, Chrome, InteractiveSurface, Reveal as _, SurfaceState};
 
 /// A framed container — the sidebar, the preview pane, a card.
 #[derive(IntoElement)]
@@ -322,7 +322,10 @@ impl RenderOnce for Row {
         if let Some(handler) = self.on_click {
             row = row.cursor_pointer().on_click(handler);
         }
-        row
+        // The pointer's glow, under the wash: a borderless row has only its
+        // fill to say it is hovered, and a flat fill across a whole row is
+        // a bar, not a light. Square, like the row.
+        row.reveal_highlight().radius(0.)
     }
 }
 
@@ -522,15 +525,23 @@ impl RenderOnce for ActionButton {
             button.px(px(space.md()))
         };
         let enabled = self.enabled;
-        let (foreground, bright) = (theme.foreground(), theme.bright_foreground());
+        // Hovered, the whole verb — glyph, label, outline — comes up to the
+        // *bright* foreground: the colour a bar paints its titles in, so a
+        // lit verb sits at the same strength as the title beside it.
+        let bright = theme.bright_foreground();
         let mut button = button
             .group(ACTION_GROUP)
             .children(self.glyph.map(|glyph| {
-                let mut glyph = div().text_color(glyph_color).child(glyph);
-                // Highlighted, the glyph steps up to the primary colour with
-                // the border: the whole button lights, not just its fill.
+                // With an id, deliberately: gpui shapes text — colour
+                // included — at layout, when the group's hitbox is not yet
+                // known, and falls back to per-element hover state that only
+                // an element with an id has. Without one, `group_hover` sets
+                // a colour the text was already shaped without.
+                let mut glyph = div().id("glyph").text_color(glyph_color).child(glyph);
+                // Highlighted, the glyph steps up with the label and the
+                // border: the whole button lights, not just its fill.
                 if enabled {
-                    glyph = glyph.group_hover(ACTION_GROUP, move |s| s.text_color(foreground));
+                    glyph = glyph.group_hover(ACTION_GROUP, move |s| s.text_color(bright));
                 }
                 glyph.into_any_element()
             }))
@@ -539,11 +550,9 @@ impl RenderOnce for ActionButton {
 
         if enabled {
             let (hover, pressed) = (theme.hover_fill(), theme.pressed_fill());
-            // The fill carries the hover, and the border and glyph step up to
-            // the primary colour with it; the label's role does not change.
             button = button
                 .cursor_pointer()
-                .hover(move |s| s.bg(hover).border_color(foreground).text_color(bright))
+                .hover(move |s| s.bg(hover).border_color(bright).text_color(bright))
                 .active(move |s| s.bg(pressed));
             if let Some(handler) = self.on_click {
                 button = button.on_click(handler);
@@ -552,7 +561,20 @@ impl RenderOnce for ActionButton {
         if let Some(hint) = hint {
             button = button.tooltip(move |_window, cx| Hint::view(hint.clone(), cx));
         }
+        if !enabled {
+            return button.into_any_element();
+        }
+        // Lit from the pointer: the glow under the fill while hovered, and
+        // the hairline outline brightening as the pointer nears — so a bar
+        // of these reads as one surface the light travels across.
+        let (radius, border) = (theme.radius().min(2.0), theme.border_width().max(1.0));
         button
+            .reveal_highlight()
+            .radius(radius)
+            .reveal_border()
+            .radius(radius)
+            .width(border)
+            .into_any_element()
     }
 }
 
@@ -691,7 +713,17 @@ impl RenderOnce for Button {
         if let Some(handler) = self.on_click {
             button = button.on_click(handler);
         }
-        button
+        // Every kind glows under the pointer; only the bordered kinds have
+        // an outline to light.
+        let highlight = button.reveal_highlight().radius(theme.radius());
+        match chrome {
+            Chrome::Quiet => highlight.into_any_element(),
+            Chrome::Always => highlight
+                .reveal_border()
+                .radius(theme.radius())
+                .width(theme.border_width().max(1.0))
+                .into_any_element(),
+        }
     }
 }
 
@@ -1106,7 +1138,7 @@ impl RenderOnce for QuietButton {
                 handler(event, window, cx);
             });
         }
-        button
+        button.reveal_highlight().radius(radius.min(2.0))
     }
 }
 

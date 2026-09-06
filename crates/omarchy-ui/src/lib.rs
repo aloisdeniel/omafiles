@@ -31,13 +31,14 @@ mod interactive;
 mod interop;
 mod menu;
 mod modal;
+mod reveal;
 mod scroll;
 mod sheets;
 mod syntax;
 mod toolbar;
 mod workbench;
 
-pub use bars::{Bar, StatusBar, spacer};
+pub use bars::{Bar, Headed, StatusBar, spacer};
 pub use columns::{Column, ColumnHeader, ColumnResize, GripEvent, SortEvent};
 pub use components::{
     ActionButton, Badge, BadgeTone, Breadcrumb, Button, ButtonKind, EmptyState, Hint, Icon,
@@ -51,6 +52,7 @@ pub use interactive::{Chrome, InteractiveSurface, SurfaceState};
 pub use interop::sync_gpui_component;
 pub use menu::{ContextMenu, GroupHeader, modal_inset, separated};
 pub use modal::{Modal, ModalSize};
+pub use reveal::{Reveal, RevealBorder, RevealHighlight, RevealStyle};
 pub use scroll::ScrollArea;
 pub use sheets::{FactSheet, ShortcutGroup, ShortcutSheet, filter_shortcuts};
 pub use syntax::SyntaxPalette;
