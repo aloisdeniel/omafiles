@@ -58,6 +58,14 @@ pub trait Reveal: IntoElement + Sized {
     fn reveal_border(self) -> RevealBorder {
         RevealBorder::new(self)
     }
+
+    /// A container's outline, lit from the pointer across its whole
+    /// length: the reach is the container's own size, so the edge nearest
+    /// the pointer is bright and the far edge has faded, wherever the
+    /// pointer is over the card. For modals and menus.
+    fn reveal_frame(self) -> RevealBorder {
+        RevealBorder::new(self).frame()
+    }
 }
 
 impl<E: IntoElement> Reveal for E {}
@@ -93,6 +101,18 @@ impl RevealStyle {
         }
     }
 
+    /// A frame's defaults: the reach is replaced by the container's size
+    /// at paint, so only the colour and the peak matter here — softer than
+    /// a button's, since a card's edge is long and the light spans it.
+    pub fn frame(theme: &Theme) -> Self {
+        Self {
+            color: theme.foreground(),
+            reach: 0.0,
+            strength: 0.6,
+            grain: 0.0,
+        }
+    }
+
     /// The border's defaults: a longer reach, since it lights neighbours,
     /// and a stronger peak, since a hairline needs it to be seen at all.
     pub fn border(theme: &Theme) -> Self {
@@ -115,6 +135,28 @@ pub fn falloff(distance: f32, reach: f32, strength: f32) -> f32 {
     let d = (distance / reach).max(0.0);
     let eased = 1.0 - (3.0 * d * d - 2.0 * d * d * d);
     strength * eased
+}
+
+/// `light` composited over `base`, alpha included.
+///
+/// Not gpui's `Hsla::blend`: that mixes the colour channels but keeps the
+/// *base's* alpha, which is right over an opaque ground and wrong for a
+/// translucent border — the light would change its hue and never its
+/// strength.
+fn over(light: Hsla, base: Hsla) -> Hsla {
+    let (l, b): (gpui::Rgba, gpui::Rgba) = (light.into(), base.into());
+    let a = l.a + b.a * (1.0 - l.a);
+    if a <= 0.0 {
+        return gpui::transparent_black();
+    }
+    let channel = |lc: f32, bc: f32| (lc * l.a + bc * b.a * (1.0 - l.a)) / a;
+    gpui::Rgba {
+        r: channel(l.r, b.r),
+        g: channel(l.g, b.g),
+        b: channel(l.b, b.b),
+        a,
+    }
+    .into()
 }
 
 fn distance(a: Point<Pixels>, b: Point<Pixels>) -> f32 {
@@ -215,10 +257,11 @@ impl Element for RevealHighlight {
     ) -> Self::PrepaintState {
         // Normal, not blocking: this hitbox exists to be *asked* whether the
         // pointer is on the element and nothing above it — a scrim, a menu —
-        // and must not change how anything else receives the mouse.
-        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        // and must not change how anything else receives the mouse. Inserted
+        // *after* the child's, so it sits above them: a child that occludes
+        // (a modal card) would otherwise hide it from the hit test.
         child.prepaint(window, cx);
-        hitbox
+        window.insert_hitbox(bounds, HitboxBehavior::Normal)
     }
 
     fn paint(
@@ -372,6 +415,10 @@ pub struct RevealBorder {
     radius: Option<f32>,
     width: Option<f32>,
     style: Option<RevealStyle>,
+    /// See [`Reveal::reveal_frame`]: the reach is the element's own size.
+    frame: bool,
+    /// See [`RevealBorder::base`].
+    base: Option<Hsla>,
 }
 
 impl RevealBorder {
@@ -381,7 +428,67 @@ impl RevealBorder {
             radius: None,
             width: None,
             style: None,
+            frame: false,
+            base: None,
         }
+    }
+
+    /// Make this outline *the* element's border: always drawn, in `base`
+    /// where the light does not reach and blending up to the light where
+    /// it does. The element should then draw no border colour of its own,
+    /// or the gradient rides on a solid line and reads as one.
+    pub fn base(mut self, base: Hsla) -> Self {
+        self.base = Some(base);
+        self
+    }
+
+    /// Make this outline the element's border in `color`: lit to
+    /// [`FRAME_LIGHT`] of its alpha where the light reaches, dimmed to
+    /// [`FRAME_BASE`] where it does not. The theme's own border colour is
+    /// what both are taken from, so the border under the pointer is a
+    /// softened version of what the theme draws, fading away from it.
+    pub fn edge(self, color: Hsla) -> Self {
+        let style = RevealStyle {
+            color,
+            strength: FRAME_LIGHT,
+            ..self.style.unwrap_or(RevealStyle {
+                color,
+                reach: 0.0,
+                strength: FRAME_LIGHT,
+                grain: 0.0,
+            })
+        };
+        self.base(color.opacity(FRAME_BASE)).style(style)
+    }
+
+    /// Light the outline across the element's whole size rather than a
+    /// fixed reach — see [`Reveal::reveal_frame`]. Defaults the style to
+    /// [`RevealStyle::frame`].
+    pub fn frame(mut self) -> Self {
+        self.frame = true;
+        self
+    }
+
+    /// The reach this element lights over: its own larger side for a
+    /// frame, the style's otherwise.
+    fn reach(&self, bounds: Bounds<Pixels>, style: RevealStyle) -> f32 {
+        if self.frame {
+            // Past half the card the light is gone: from the middle, the
+            // near edge is bright and the corners have faded to the base.
+            f32::from(bounds.size.width).max(f32::from(bounds.size.height)) * FRAME_REACH
+        } else {
+            style.reach
+        }
+    }
+
+    fn resolved_style(&self, theme: &Theme) -> RevealStyle {
+        self.style.unwrap_or_else(|| {
+            if self.frame {
+                RevealStyle::frame(theme)
+            } else {
+                RevealStyle::border(theme)
+            }
+        })
     }
 
     /// The corner radius of the outline. Match the element's own; defaults
@@ -413,11 +520,28 @@ impl IntoElement for RevealBorder {
     }
 }
 
+/// How much of the border's strength a *nearby* pointer earns, against a
+/// pointer on the element itself.
+const NEAR_STRENGTH: f32 = 0.5;
+
+/// A frame's reach, as a fraction of the container's larger side.
+const FRAME_REACH: f32 = 0.6;
+
+/// How much of an [`RevealBorder::edge`] colour's alpha remains where the
+/// light does not reach.
+pub const FRAME_BASE: f32 = 0.3;
+
+/// How much of an [`RevealBorder::edge`] colour the light adds at the
+/// pointer, over the base.
+pub const FRAME_LIGHT: f32 = 0.5;
+
 /// What the border remembers between prepaint and paint.
 pub struct BorderPrepaint {
     /// Covers the element *and* its reach, so `is_hovered` answers "is the
     /// pointer near, with nothing blocking in front" in one query.
     zone: Hitbox,
+    /// The reach the zone was built with, so paint lights the same span.
+    reach: f32,
 }
 
 impl Element for RevealBorder {
@@ -453,12 +577,11 @@ impl Element for RevealBorder {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let reach = self
-            .style
-            .map_or_else(|| RevealStyle::border(cx.theme()).reach, |s| s.reach);
-        let zone = window.insert_hitbox(bounds.dilate(px(reach)), HitboxBehavior::Normal);
+        let reach = self.reach(bounds, self.resolved_style(cx.theme()));
+        // After the child, above its hitboxes — see `RevealHighlight`.
         child.prepaint(window, cx);
-        BorderPrepaint { zone }
+        let zone = window.insert_hitbox(bounds.dilate(px(reach)), HitboxBehavior::Normal);
+        BorderPrepaint { zone, reach }
     }
 
     fn paint(
@@ -472,7 +595,10 @@ impl Element for RevealBorder {
         cx: &mut App,
     ) {
         let theme = cx.theme();
-        let style = self.style.unwrap_or_else(|| RevealStyle::border(theme));
+        let style = RevealStyle {
+            reach: prepaint.reach,
+            ..self.resolved_style(theme)
+        };
         let radius = self.radius.unwrap_or_else(|| theme.radius());
         let width = self.width.unwrap_or_else(|| theme.border_width().max(1.0));
         let pointer = window.mouse_position();
@@ -480,9 +606,39 @@ impl Element for RevealBorder {
         child.paint(window, cx);
 
         // Over the child: the lit outline sits on top of the element's own
-        // border and brightens it where the pointer is.
-        if prepaint.zone.is_hovered(window) {
-            for piece in outline_pieces(bounds, radius, width, pointer, style) {
+        // border and brightens it where the pointer is. A neighbour lights
+        // at half strength — enough to say the surface is one, not enough
+        // to compete with the button the pointer is actually on.
+        let hovered = prepaint.zone.is_hovered(window);
+        if hovered || self.base.is_some() {
+            let strength = if !hovered {
+                // Not lit at all — a keyboard user, or a pointer elsewhere
+                // — so only the base is drawn.
+                0.0
+            } else if bounds.contains(&pointer) {
+                style.strength
+            } else {
+                style.strength * NEAR_STRENGTH
+            };
+            let style = RevealStyle { strength, ..style };
+            // A frame is normalised to the pointer: the nearest point of
+            // the outline is always fully lit and the farthest corner is
+            // always at the base, wherever the pointer sits over the card.
+            // A fixed reach would leave the whole outline dim from the
+            // middle of a large card, where every edge is far.
+            let (near, style) = if self.frame {
+                let (near, far) = outline_distances(bounds, pointer);
+                (
+                    near,
+                    RevealStyle {
+                        reach: (far - near).max(1.0),
+                        ..style
+                    },
+                )
+            } else {
+                (0.0, style)
+            };
+            for piece in outline_pieces(bounds, radius, width, pointer, style, near, self.base) {
                 window.paint_quad(piece.into_quad());
             }
         }
@@ -545,8 +701,38 @@ impl OutlinePiece {
     }
 }
 
+/// How far the pointer is from the nearest point of `bounds`' outline, and
+/// from its farthest corner. Zero for the first when the pointer is on the
+/// outline; from inside, the distance to the closest edge.
+fn outline_distances(bounds: Bounds<Pixels>, pointer: Point<Pixels>) -> (f32, f32) {
+    let (left, top, right, bottom) = (
+        f32::from(bounds.left()),
+        f32::from(bounds.top()),
+        f32::from(bounds.right()),
+        f32::from(bounds.bottom()),
+    );
+    let (x, y) = (f32::from(pointer.x), f32::from(pointer.y));
+    let inside = x >= left && x <= right && y >= top && y <= bottom;
+    let near = if inside {
+        (x - left).min(right - x).min(y - top).min(bottom - y)
+    } else {
+        let dx = (left - x).max(0.0).max(x - right);
+        let dy = (top - y).max(0.0).max(y - bottom);
+        (dx * dx + dy * dy).sqrt()
+    };
+    let far = [(left, top), (right, top), (right, bottom), (left, bottom)]
+        .into_iter()
+        .map(|(cx, cy)| distance(pointer, point(px(cx), px(cy))))
+        .fold(0.0, f32::max);
+    (near, far)
+}
+
 /// The outline of `bounds`, `width` thick and drawn inside it like a CSS
-/// border, lit from `pointer`.
+/// border, lit from `pointer` — over nothing, or over a `base` colour that
+/// the light blends onto, so the outline is a complete border on its own.
+/// `near` is subtracted from every distance before the falloff: a frame
+/// passes the distance to its nearest edge, so that edge starts at full
+/// strength.
 ///
 /// Each straight edge is split at the pointer's projection onto it, so a
 /// two-stop gradient per half gives a peak under the pointer and a fade
@@ -559,6 +745,8 @@ fn outline_pieces(
     width: f32,
     pointer: Point<Pixels>,
     style: RevealStyle,
+    near: f32,
+    base: Option<Hsla>,
 ) -> Vec<OutlinePiece> {
     let (left, top, right, bottom) = (
         f32::from(bounds.left()),
@@ -578,7 +766,13 @@ fn outline_pieces(
     // The brightness of the outline at a point on its centreline.
     let lit = |x: f32, y: f32| {
         let d = distance(pointer, point(px(x), px(y)));
-        style.color.opacity(falloff(d, style.reach, style.strength))
+        let light = style
+            .color
+            .opacity(falloff(d - near, style.reach, style.strength));
+        match base {
+            Some(base) => over(light, base),
+            None => light,
+        }
     };
     let (px_, py_) = (f32::from(pointer.x), f32::from(pointer.y));
 
@@ -808,6 +1002,8 @@ mod tests {
             1.0,
             point(px(30.), px(10.)),
             style(),
+            0.0,
+            None,
         );
         assert_eq!(pieces.len(), 8);
         assert!(
@@ -848,6 +1044,8 @@ mod tests {
             1.0,
             point(px(-500.), px(-500.)),
             style(),
+            0.0,
+            None,
         );
         let corners = pieces
             .iter()
@@ -869,6 +1067,71 @@ mod tests {
     }
 
     #[test]
+    fn a_base_is_the_border_where_the_light_does_not_reach() {
+        let base = gpui::red();
+        let pieces = outline_pieces(
+            rect(0., 0., 100., 40.),
+            4.0,
+            1.0,
+            point(px(900.), px(900.)),
+            style(),
+            0.0,
+            Some(base),
+        );
+        for piece in &pieces {
+            match piece {
+                OutlinePiece::Edge { from, to, .. } => {
+                    assert_eq!(*from, base);
+                    assert_eq!(*to, base);
+                }
+                OutlinePiece::Corner { color, .. } => assert_eq!(*color, base),
+            }
+        }
+        // And under the pointer the light lifts it off the base.
+        let lit = outline_pieces(
+            rect(0., 0., 100., 40.),
+            0.0,
+            1.0,
+            point(px(0.), px(0.)),
+            style(),
+            0.0,
+            Some(base),
+        );
+        let brightest = lit
+            .iter()
+            .filter_map(|p| match p {
+                OutlinePiece::Edge { from, to, .. } => Some(from.l.max(to.l)),
+                _ => None,
+            })
+            .fold(0.0, f32::max);
+        assert!(brightest > base.l, "{brightest} vs {}", base.l);
+    }
+
+    #[test]
+    fn outline_distances_measure_the_nearest_edge_and_farthest_corner() {
+        let bounds = rect(0., 0., 100., 40.);
+        // Inside: 10 from the top edge, farthest corner is bottom-right.
+        let (near, far) = outline_distances(bounds, point(px(30.), px(10.)));
+        assert_eq!(near, 10.0);
+        assert!((far - (70.0f32 * 70.0 + 30.0 * 30.0).sqrt()).abs() < 1e-3);
+        // On the outline.
+        assert_eq!(outline_distances(bounds, point(px(0.), px(20.))).0, 0.0);
+        // Outside, straight below the bottom edge.
+        assert_eq!(outline_distances(bounds, point(px(50.), px(60.))).0, 20.0);
+    }
+
+    #[test]
+    fn light_over_a_translucent_base_raises_its_alpha() {
+        let base = gpui::white().opacity(0.3);
+        assert_eq!(over(gpui::white().opacity(0.0), base).a, 0.3);
+        let half = over(gpui::white().opacity(0.5), base).a;
+        assert!((half - 0.65).abs() < 1e-5, "{half}");
+        assert_eq!(over(gpui::white(), base).a, 1.0);
+        // gpui's own blend is what this replaces: it would keep 0.3.
+        assert_eq!(base.blend(gpui::white().opacity(0.5)).a, 0.3);
+    }
+
+    #[test]
     fn a_far_pointer_leaves_the_outline_dark() {
         let pieces = outline_pieces(
             rect(0., 0., 100., 40.),
@@ -876,6 +1139,8 @@ mod tests {
             1.0,
             point(px(900.), px(900.)),
             style(),
+            0.0,
+            None,
         );
         for piece in pieces {
             match piece {

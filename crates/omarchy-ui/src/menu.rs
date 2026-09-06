@@ -13,7 +13,7 @@ use gpui::{
 };
 
 use crate::components::ElementAdapter;
-use crate::{ActiveTheme as _, Modal, Separator};
+use crate::{ActiveTheme as _, Modal, Reveal as _, Separator};
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
@@ -131,8 +131,8 @@ impl RenderOnce for ContextMenu {
             .w(px(width))
             .rounded(px(theme.radius()))
             .bg(theme.menu_background())
+            // The width only: the colour is the frame's, below.
             .border(px(theme.border_width().max(1.0)))
-            .border_color(theme.menu_border())
             .occlude()
             .child(
                 div()
@@ -166,7 +166,14 @@ impl RenderOnce for ContextMenu {
                     .absolute()
                     .left(px(x.max(0.0)))
                     .top(px(y.max(0.0)))
-                    .child(card),
+                    // The card's edge lights from the pointer across its
+                    // whole length, like a modal's.
+                    .child(
+                        card.reveal_frame()
+                            .edge(theme.menu_border())
+                            .radius(theme.radius())
+                            .width(theme.border_width().max(1.0)),
+                    ),
             )
             .into_any_element()
     }
