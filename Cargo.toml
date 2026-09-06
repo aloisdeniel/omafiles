@@ -79,6 +79,9 @@ futures = "0.3"
 # The glow texture omarchy-ui/src/reveal.rs builds is a gpui `RenderImage`,
 # whose frames are this crate's type; the version floats with gpui's.
 image = { version = "0.25", default-features = false }
+# Reads the UI font to centre icon glyphs by ink (omarchy-ui/src/glyphs.rs);
+# already in the graph under cosmic-text, so the version follows gpui's.
+ttf-parser = { version = "0.25", default-features = false }
 nucleo = "0.5"
 ignore = "0.4"
 

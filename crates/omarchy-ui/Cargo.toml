@@ -14,6 +14,7 @@ serde_json.workspace = true
 futures.workspace = true
 gpui-component.workspace = true
 image.workspace = true
+ttf-parser.workspace = true
 
 [dev-dependencies]
 # Only the gallery example opens a window, so the platform backend is not a

@@ -465,6 +465,21 @@ impl ParentElement for ActionButton {
 
 impl RenderOnce for ActionButton {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let (label, hint) = if self.compact {
+            (None, self.label)
+        } else {
+            (self.label, None)
+        };
+        let square = label.is_none() && self.children.is_empty();
+        let caption = cx.theme().type_scale().caption();
+        // A glyph alone is centred by its ink, not its advance — see
+        // [`crate::glyph_ink_shift`]. Measured before the theme is borrowed
+        // for the rest of the render, since the measurement caches.
+        let shift = match &self.glyph {
+            Some(glyph) if square => crate::glyph_ink_shift(glyph, caption, cx),
+            _ => 0.0,
+        };
+
         let theme = cx.theme();
         let space = theme.space();
         // A step below control-height: these are chrome verbs, not form
@@ -472,12 +487,6 @@ impl RenderOnce for ActionButton {
         // the content around them. Derived from the scale so it tracks the
         // user's text size.
         let size = space.control_height() - space.md();
-        let (label, hint) = if self.compact {
-            (None, self.label)
-        } else {
-            (self.label, None)
-        };
-        let square = label.is_none() && self.children.is_empty();
 
         // Two roles inside one button: the glyph is always the *secondary*
         // colour — it decorates the verb rather than being it — and the label
@@ -491,7 +500,6 @@ impl RenderOnce for ActionButton {
         } else {
             (theme.dim_foreground(), theme.foreground())
         };
-        let caption = theme.type_scale().caption();
 
         let button = div()
             .id(self.id)
@@ -537,7 +545,13 @@ impl RenderOnce for ActionButton {
                 // known, and falls back to per-element hover state that only
                 // an element with an id has. Without one, `group_hover` sets
                 // a colour the text was already shaped without.
-                let mut glyph = div().id("glyph").text_color(glyph_color).child(glyph);
+                // A relative offset, so the layout is untouched.
+                let mut glyph = div()
+                    .id("glyph")
+                    .relative()
+                    .left(px(-shift))
+                    .text_color(glyph_color)
+                    .child(glyph);
                 // Highlighted, the glyph steps up with the label and the
                 // border: the whole button lights, not just its fill.
                 if enabled {
@@ -1105,8 +1119,10 @@ impl QuietButton {
 
 impl RenderOnce for QuietButton {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let caption = cx.theme().type_scale().caption();
+        // Centred by its ink — see [`crate::glyph_ink_shift`].
+        let shift = crate::glyph_ink_shift(&self.glyph, caption, cx);
         let theme = cx.theme();
-        let caption = theme.type_scale().caption();
         let size = theme.icon_column();
         let (hover_fill, bright, radius) = (
             theme.hover_fill(),
@@ -1126,7 +1142,7 @@ impl RenderOnce for QuietButton {
             .text_size(px(caption))
             .text_color(color)
             .hover(move |style| style.bg(hover_fill).text_color(bright))
-            .child(self.glyph);
+            .child(div().relative().left(px(-shift)).child(self.glyph));
         if self.revealed_by_row {
             button = button
                 .invisible()

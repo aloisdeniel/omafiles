@@ -27,6 +27,7 @@ mod columns;
 mod components;
 mod contrast;
 mod drag;
+mod glyphs;
 mod interactive;
 mod interop;
 mod menu;
@@ -48,6 +49,7 @@ pub use contrast::{
     MIN_PRIMARY_CONTRAST, MIN_SECONDARY_CONTRAST, best_of, contrast_ratio, ensure_contrast,
 };
 pub use drag::{DragLabel, drag_label, drop_highlight};
+pub use glyphs::glyph_ink_shift;
 pub use interactive::{Chrome, InteractiveSurface, SurfaceState};
 pub use interop::sync_gpui_component;
 pub use menu::{ContextMenu, GroupHeader, modal_inset, separated};

@@ -4628,6 +4628,7 @@ dependencies = [
  "image",
  "omarchy-tokens",
  "serde_json",
+ "ttf-parser",
 ]
 
 [[package]]
