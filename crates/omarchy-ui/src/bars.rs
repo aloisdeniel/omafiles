@@ -14,7 +14,7 @@ use gpui::{
     Window, div, linear_color_stop, linear_gradient, px,
 };
 
-use crate::{ActiveTheme as _, ColumnHeader, Separator, Theme};
+use crate::{ActiveTheme as _, ColumnHeader, Frosted, Separator, Theme};
 
 /// A flexible gap between a bar's leading and trailing items.
 pub fn spacer() -> Div {
@@ -300,13 +300,16 @@ impl RenderOnce for Headed {
         // cannot light up or be clicked through it — but the wheel still
         // reaches the body, since scrolling from the bar is what scrolling
         // under it invites.
-        let mut stack = div().flex().flex_col().bg(veil).block_mouse_except_scroll();
+        let mut stack = div().flex().flex_col().block_mouse_except_scroll();
         for (index, head) in self.heads.into_iter().enumerate() {
             stack = stack.child(head.into_element());
             if index < last || !self.faded {
                 stack = stack.child(Separator::horizontal());
             }
         }
+        // The veil is frosted: the fill, then a grain over it, then the
+        // heads. gpui cannot blur the rows underneath, and the grain is
+        // what stops them reading sharp through the veil.
         let mut overlay = div()
             .absolute()
             .top_0()
@@ -314,7 +317,7 @@ impl RenderOnce for Headed {
             .right_0()
             .flex()
             .flex_col()
-            .child(stack);
+            .child(Frosted::new(stack).fill(veil));
         if self.faded {
             overlay = overlay.child(div().h(px(fade)).w_full().bg(linear_gradient(
                 180.,

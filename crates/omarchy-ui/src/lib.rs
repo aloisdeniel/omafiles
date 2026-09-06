@@ -28,6 +28,7 @@ mod components;
 mod contrast;
 mod drag;
 mod glyphs;
+mod grain;
 mod interactive;
 mod interop;
 mod menu;
@@ -50,6 +51,7 @@ pub use contrast::{
 };
 pub use drag::{DragLabel, drag_label, drop_highlight};
 pub use glyphs::glyph_ink_shift;
+pub use grain::{Frosted, GrainStyle, paint_grain};
 pub use interactive::{Chrome, InteractiveSurface, SurfaceState};
 pub use interop::sync_gpui_component;
 pub use menu::{ContextMenu, GroupHeader, modal_inset, separated};

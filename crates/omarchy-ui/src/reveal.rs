@@ -19,6 +19,9 @@
 //! segments per edge, split at the pointer's projection so each edge peaks
 //! there, plus one solid arc per rounded corner.
 //!
+//! The highlight is grained as well — see [`crate::grain`] — so it reads as
+//! a lit texture rather than a flat gradient.
+//!
 //! Repaints are driven from here. gpui only redraws on a hover *change*, and
 //! a glow that follows the pointer has to redraw on every move — so each
 //! wrapper registers a mouse-move listener and refreshes the window while
@@ -29,13 +32,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Background, BorderStyle, Bounds, Corners, DispatchPhase, Edges, Element,
-    ElementId, Global, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
+    AnyElement, App, Background, BorderStyle, Bounds, ContentMask, Corners, DispatchPhase, Edges,
+    Element, ElementId, Global, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
     IntoElement, LayoutId, MouseMoveEvent, Pixels, Point, RenderImage, Window, fill,
     linear_color_stop, linear_gradient, point, px, quad, size, transparent_black,
 };
 
-use crate::{ActiveTheme as _, Theme};
+use crate::{ActiveTheme as _, GrainStyle, Theme, grain::paint_grain};
 
 /// Wrap any element in a reveal effect.
 ///
@@ -73,6 +76,9 @@ pub struct RevealStyle {
     pub reach: f32,
     /// Peak alpha, at the pointer.
     pub strength: f32,
+    /// The grain's peak alpha, at the pointer — see [`crate::GrainStyle`].
+    /// Zero for a smooth light. Only the highlight has a surface to grain.
+    pub grain: f32,
 }
 
 impl RevealStyle {
@@ -83,6 +89,7 @@ impl RevealStyle {
             color: theme.foreground(),
             reach: theme.space().control_height() * 3.0,
             strength: 0.10,
+            grain: 0.04,
         }
     }
 
@@ -93,6 +100,7 @@ impl RevealStyle {
             color: theme.foreground(),
             reach: theme.space().control_height() * 4.0,
             strength: 0.55,
+            grain: 0.0,
         }
     }
 }
@@ -226,6 +234,7 @@ impl Element for RevealHighlight {
         let theme = cx.theme();
         let style = self.style.unwrap_or_else(|| RevealStyle::highlight(theme));
         let radius = self.radius.unwrap_or_else(|| theme.radius());
+        let dark = theme.sunken();
         let pointer = window.mouse_position();
 
         // Under the child, so the element's own wash and text paint over it
@@ -248,11 +257,52 @@ impl Element for RevealHighlight {
                 0,
                 false,
             );
+            paint_glow_grain(bounds, pointer, style, dark, window, cx);
         }
 
         child.paint(window, cx);
         follow_pointer(bounds, pointer, window);
     }
+}
+
+/// How many rings the glow's grain is stepped in.
+const GRAIN_RINGS: u32 = 5;
+
+/// Grain over the glow, denser toward the pointer.
+///
+/// The tile is one fixed texture, so it cannot fade on its own; the fade is
+/// stepped instead — the same tile painted into concentric circles, the
+/// widest at the reach and each one after a fifth smaller, so the specks
+/// under the pointer carry five layers and those at the edge one. The
+/// circles are `paint_image`'s rounded clip, a square with radii of half
+/// its side, inside a mask of the element's own bounds.
+fn paint_glow_grain(
+    bounds: Bounds<Pixels>,
+    pointer: Point<Pixels>,
+    style: RevealStyle,
+    dark: Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if style.grain <= 0.0 {
+        return;
+    }
+    let grain = GrainStyle {
+        light: style.color,
+        dark,
+        strength: style.grain,
+    };
+    let layer = style.grain / GRAIN_RINGS as f32;
+    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        for ring in 0..GRAIN_RINGS {
+            let radius = px(style.reach * (1.0 - ring as f32 / GRAIN_RINGS as f32));
+            let circle = Bounds {
+                origin: pointer - point(radius, radius),
+                size: size(radius * 2.0, radius * 2.0),
+            };
+            paint_grain(circle, Corners::all(radius), grain, layer, window, cx);
+        }
+    });
 }
 
 /// The glow textures, one per colour and strength, built on first use.
@@ -726,6 +776,7 @@ mod tests {
             .into(),
             reach: 10.0,
             strength: 0.5,
+            grain: 0.0,
         };
         let [b, g, r, a] = glow_key(style);
         assert_eq!((r, b), (255, 0));
@@ -738,6 +789,7 @@ mod tests {
             color: gpui::white(),
             reach: 100.0,
             strength: 1.0,
+            grain: 0.0,
         }
     }
 
