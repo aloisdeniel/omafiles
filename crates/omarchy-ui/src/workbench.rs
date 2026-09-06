@@ -27,7 +27,7 @@ use gpui::{
     px,
 };
 
-use crate::{ActiveTheme as _, Bar, Headed, QuietButton, Separator, Theme};
+use crate::{ActiveTheme as _, Bar, Frosted, Headed, QuietButton, Separator, Theme};
 
 /// The two side panels, as the things that can be opened, closed and
 /// resized.
@@ -737,16 +737,16 @@ fn float(
         PanelSide::Right => ("panel-float-right", div().justify_end()),
     };
     let panels = panels.clone();
-    layer
+    let layer = layer
         .id(id)
         .absolute()
         .inset_0()
-        .bg(scrim)
         .flex()
         .flex_row()
         .on_click(move |_e, _w, cx| panels.update(cx, |p, cx| p.close(side, cx)))
-        .child(card)
-        .into_any_element()
+        .child(card);
+    // The same frosted scrim a modal hangs over.
+    Frosted::new(layer).fill(scrim).into_any_element()
 }
 
 #[cfg(test)]

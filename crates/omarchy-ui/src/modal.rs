@@ -14,7 +14,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled, Window, div, px,
 };
 
-use crate::{ActiveTheme as _, KeyHint, Separator};
+use crate::{ActiveTheme as _, Frosted, KeyHint, Separator};
 
 /// Named because the boxed closure type is unreadable inline.
 type DismissHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -204,12 +204,13 @@ impl RenderOnce for Modal {
             .flex()
             .items_start()
             .justify_center()
-            .pt(px(margin))
-            .bg(scrim);
+            .pt(px(margin));
 
         if let Some(handler) = self.on_dismiss {
             scrim_layer = scrim_layer.on_click(handler);
         }
-        scrim_layer.child(card)
+        // Frosted, like a bar's veil: the grain over the dimmed window is
+        // what makes it read as behind glass rather than merely darker.
+        Frosted::new(scrim_layer.child(card)).fill(scrim)
     }
 }
