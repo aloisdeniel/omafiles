@@ -154,7 +154,9 @@ impl RenderOnce for ContextMenu {
                     .children(separated(self.rows)),
             );
 
-        let mut scrim = div().id(self.id).absolute().inset_0();
+        // Transparent, but still the pointer's: a row under an open menu
+        // must not light up, and a click outside only dismisses.
+        let mut scrim = div().id(self.id).occlude().absolute().inset_0();
         if let Some(handler) = self.on_dismiss {
             scrim = scrim.on_click(handler);
         }

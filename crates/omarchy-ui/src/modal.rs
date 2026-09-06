@@ -194,8 +194,11 @@ impl RenderOnce for Modal {
         // Explicit insets rather than `size_full()`: a percentage height on an
         // absolutely positioned child resolves against the containing block in
         // a way that left the scrim covering only part of the window.
+        // Occluded: nothing behind the scrim is hovered, clicked or
+        // scrolled while the modal is up — the layer owns the pointer.
         let mut scrim_layer = div()
             .id(self.id)
+            .occlude()
             .absolute()
             .top_0()
             .left_0()

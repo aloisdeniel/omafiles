@@ -1843,6 +1843,22 @@ impl Explorer {
         self.overlay.is_some()
     }
 
+    /// A world verb's handler: one that acts on the panes, the tabs, the
+    /// window — and so must do nothing while an overlay owns input. Every
+    /// root handler goes through here unless it is the overlay's own
+    /// (Escape, Enter, the arrows), so a new verb is guarded by
+    /// construction rather than by remembering to.
+    fn world<A: gpui::Action>(
+        cx: &mut Context<Self>,
+        handler: impl Fn(&mut Self, &A, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl Fn(&A, &mut Window, &mut App) + 'static {
+        cx.listener(move |this, action, window, cx| {
+            if !this.overlay_owns_input() {
+                handler(this, action, window, cx);
+            }
+        })
+    }
+
     fn move_in_pane(&mut self, delta: isize, cx: &mut Context<Self>) {
         // An open overlay owns the arrow keys; the panes behind it do not move
         // under a modal. The expanded preview is not an overlay — it is the
@@ -4357,15 +4373,11 @@ impl Render for Explorer {
             // on the focused pane rather than duplicating the handlers.
             .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_in_pane(1, cx)))
             .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_in_pane(-1, cx)))
-            .on_action(cx.listener(|this, _: &PageDown, _, cx| {
-                if !this.overlay_owns_input() {
-                    this.move_cursor(PAGE, cx)
-                }
+            .on_action(Self::world(cx, |this, _: &PageDown, _, cx| {
+                this.move_cursor(PAGE, cx)
             }))
-            .on_action(cx.listener(|this, _: &PageUp, _, cx| {
-                if !this.overlay_owns_input() {
-                    this.move_cursor(-PAGE, cx)
-                }
+            .on_action(Self::world(cx, |this, _: &PageUp, _, cx| {
+                this.move_cursor(-PAGE, cx)
             }))
             .on_action(cx.listener(|this, _: &MoveFirst, _, cx| this.edge_in_pane(false, cx)))
             .on_action(cx.listener(|this, _: &MoveLast, _, cx| this.edge_in_pane(true, cx)))
@@ -4383,10 +4395,7 @@ impl Render for Explorer {
                     Pane::Listing => this.open_selected(cx),
                 }
             }))
-            .on_action(cx.listener(|this, _: &GoUp, _, cx| {
-                if this.overlay_owns_input() {
-                    return;
-                }
+            .on_action(Self::world(cx, |this, _: &GoUp, _, cx| {
                 let leaving = this.cursor_name();
                 let moved = this
                     .session
@@ -4396,10 +4405,7 @@ impl Render for Explorer {
                     this.reload(cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &GoBack, _, cx| {
-                if this.overlay_owns_input() {
-                    return;
-                }
+            .on_action(Self::world(cx, |this, _: &GoBack, _, cx| {
                 let leaving = this.cursor_name();
                 let moved = this
                     .session
@@ -4409,10 +4415,7 @@ impl Render for Explorer {
                     this.reload(cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &GoForward, _, cx| {
-                if this.overlay_owns_input() {
-                    return;
-                }
+            .on_action(Self::world(cx, |this, _: &GoForward, _, cx| {
                 let leaving = this.cursor_name();
                 let moved = this
                     .session
@@ -4422,42 +4425,50 @@ impl Render for Explorer {
                     this.reload(cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &ToggleHidden, _, cx| {
-                if !this.overlay_owns_input() {
-                    this.toggle_hidden(cx)
-                }
+            .on_action(Self::world(cx, |this, _: &ToggleHidden, _, cx| {
+                this.toggle_hidden(cx)
             }))
-            .on_action(cx.listener(|this, _: &Refresh, _, cx| {
-                if !this.overlay_owns_input() {
-                    this.reload(cx)
-                }
-            }))
-            .on_action(cx.listener(|this, _: &FocusNext, window, cx| {
+            .on_action(Self::world(cx, |this, _: &Refresh, _, cx| this.reload(cx)))
+            .on_action(Self::world(cx, |this, _: &FocusNext, window, cx| {
                 let next = match this.pane {
                     Pane::Sidebar => Pane::Listing,
                     Pane::Listing => Pane::Sidebar,
                 };
                 this.focus_pane(next, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &FocusPrevious, window, cx| {
+            .on_action(Self::world(cx, |this, _: &FocusPrevious, window, cx| {
                 let previous = match this.pane {
                     Pane::Sidebar => Pane::Listing,
                     Pane::Listing => Pane::Sidebar,
                 };
                 this.focus_pane(previous, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &PinCurrent, _, cx| this.pin_current(cx)))
-            .on_action(cx.listener(|this, _: &UnpinSelected, _, cx| this.unpin_selected(cx)))
-            .on_action(cx.listener(|this, _: &MovePinUp, _, cx| this.move_pin(-1, cx)))
-            .on_action(cx.listener(|this, _: &MovePinDown, _, cx| this.move_pin(1, cx)))
-            .on_action(cx.listener(|this, _: &NewTab, _, cx| this.new_tab(cx)))
-            .on_action(cx.listener(|this, _: &CloseTab, _, cx| this.close_tab(cx)))
-            .on_action(cx.listener(|this, _: &NextTab, _, cx| this.cycle_tab(1, cx)))
-            .on_action(cx.listener(|this, _: &PreviousTab, _, cx| this.cycle_tab(-1, cx)))
-            .on_action(cx.listener(|this, _: &NewWorkspace, window, cx| {
+            .on_action(Self::world(cx, |this, _: &PinCurrent, _, cx| {
+                this.pin_current(cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &UnpinSelected, _, cx| {
+                this.unpin_selected(cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &MovePinUp, _, cx| {
+                this.move_pin(-1, cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &MovePinDown, _, cx| {
+                this.move_pin(1, cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &NewTab, _, cx| this.new_tab(cx)))
+            .on_action(Self::world(cx, |this, _: &CloseTab, _, cx| {
+                this.close_tab(cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &NextTab, _, cx| {
+                this.cycle_tab(1, cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &PreviousTab, _, cx| {
+                this.cycle_tab(-1, cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &NewWorkspace, window, cx| {
                 this.open_workspace_prompt(None, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &RenameWorkspace, window, cx| {
+            .on_action(Self::world(cx, |this, _: &RenameWorkspace, window, cx| {
                 let active = this.session.active_workspace();
                 if this
                     .session
@@ -4467,12 +4478,12 @@ impl Render for Explorer {
                     this.open_workspace_prompt(Some(active), window, cx);
                 }
             }))
-            .on_action(
-                cx.listener(|this, _: &StartSearch, window, cx| this.open_finder(window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &AddNetwork, window, cx| this.open_add_network(window, cx)),
-            )
+            .on_action(Self::world(cx, |this, _: &StartSearch, window, cx| {
+                this.open_finder(window, cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &AddNetwork, window, cx| {
+                this.open_add_network(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
                 // Ordered: an open overlay is on top of the expanded
                 // preview, so it must be the one Escape closes first.
@@ -4486,94 +4497,82 @@ impl Render for Explorer {
             .on_action(
                 cx.listener(|this, _: &Confirm, window, cx| this.confirm_overlay(window, cx)),
             )
-            .on_action(cx.listener(|this, _: &TogglePreview, _, cx| this.toggle_preview(cx)))
-            .on_action(
-                cx.listener(|this, _: &SwitchBranch, window, cx| this.open_branches(window, cx)),
-            )
-            .on_action(cx.listener(|this, _: &OpenTerminal, _, cx| {
-                if !this.overlay_owns_input() {
-                    this.open_terminal_here(cx)
-                }
+            .on_action(Self::world(cx, |this, _: &TogglePreview, _, cx| {
+                this.toggle_preview(cx)
             }))
-            .on_action(cx.listener(|this, _: &AskAgent, window, cx| {
+            .on_action(Self::world(cx, |this, _: &SwitchBranch, window, cx| {
+                this.open_branches(window, cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &OpenTerminal, _, cx| {
+                this.open_terminal_here(cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &AskAgent, window, cx| {
                 // Guarded like the other world verbs: a leaked keystroke under
                 // a modal must not summon an external picker.
-                if !this.overlay_owns_input() {
-                    this.ask_agent(window, cx)
-                }
+                this.ask_agent(window, cx)
             }))
-            .on_action(cx.listener(|this, _: &ShareEntry, _, cx| {
-                if !this.overlay_owns_input() {
-                    this.share_selected(cx)
-                }
+            .on_action(Self::world(cx, |this, _: &ShareEntry, _, cx| {
+                this.share_selected(cx)
             }))
-            .on_action(
-                cx.listener(|this, _: &ServerMenu, window, cx| this.open_server_menu(window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &CommandPalette, window, cx| this.open_palette(window, cx)),
-            )
-            .on_action(cx.listener(|this, _: &CopyEntry, window, cx| {
-                if !this.overlay_owns_input() {
-                    this.copy_selected(window, cx)
-                }
+            .on_action(Self::world(cx, |this, _: &ServerMenu, window, cx| {
+                this.open_server_menu(window, cx)
             }))
-            .on_action(cx.listener(|this, _: &CutEntry, _, cx| {
-                if !this.overlay_owns_input() {
-                    this.cut_selected(cx)
-                }
+            .on_action(Self::world(cx, |this, _: &CommandPalette, window, cx| {
+                this.open_palette(window, cx)
             }))
-            .on_action(cx.listener(|this, _: &CopyPath, _, cx| {
-                if !this.overlay_owns_input() {
-                    this.copy_path_selected(cx)
-                }
+            .on_action(Self::world(cx, |this, _: &CopyEntry, window, cx| {
+                this.copy_selected(window, cx)
             }))
-            .on_action(cx.listener(|this, _: &ExtendDown, _, cx| this.extend_selection(1, cx)))
-            .on_action(cx.listener(|this, _: &ExtendUp, _, cx| this.extend_selection(-1, cx)))
-            .on_action(cx.listener(|this, _: &SelectAll, _, cx| this.select_all(cx)))
-            .on_action(cx.listener(|this, _: &ToggleSelect, _, cx| this.toggle_select(cx)))
-            .on_action(cx.listener(|this, _: &DeleteEntry, window, cx| {
-                if !this.overlay_owns_input() {
-                    this.delete_selected(window, cx)
-                }
+            .on_action(Self::world(cx, |this, _: &CutEntry, _, cx| {
+                this.cut_selected(cx)
             }))
-            .on_action(cx.listener(|this, _: &PasteHere, _, cx| {
-                if !this.overlay_owns_input() {
-                    this.paste_here(cx)
-                }
+            .on_action(Self::world(cx, |this, _: &CopyPath, _, cx| {
+                this.copy_path_selected(cx)
             }))
-            .on_action(cx.listener(|this, _: &CompressEntry, _, cx| {
-                if !this.overlay_owns_input() {
-                    this.compress_selected(cx)
-                }
+            .on_action(Self::world(cx, |this, _: &ExtendDown, _, cx| {
+                this.extend_selection(1, cx)
             }))
-            .on_action(
-                cx.listener(|this, _: &EntryMenu, window, cx| {
-                    this.open_entry_menu(None, window, cx)
-                }),
-            )
-            .on_action(cx.listener(|this, _: &MoveEntry, window, cx| {
-                if !this.overlay_owns_input() {
-                    this.move_selected(window, cx)
-                }
+            .on_action(Self::world(cx, |this, _: &ExtendUp, _, cx| {
+                this.extend_selection(-1, cx)
             }))
-            .on_action(
-                cx.listener(|this, _: &ToggleButtonLabels, _, cx| this.toggle_button_labels(cx)),
-            )
-            .on_action(cx.listener(|this, _: &CreateFile, window, cx| {
-                if !this.overlay_owns_input() {
-                    this.create_file_here(window, cx)
-                }
+            .on_action(Self::world(cx, |this, _: &SelectAll, _, cx| {
+                this.select_all(cx)
             }))
-            .on_action(
-                cx.listener(|this, _: &ServerList, window, cx| this.open_server_list(window, cx)),
-            )
-            .on_action(cx.listener(|this, _: &ShowHelp, window, cx| this.show_help(window, cx)))
-            .on_action(cx.listener(|this, _: &ToggleLeftPanel, _, cx| {
+            .on_action(Self::world(cx, |this, _: &ToggleSelect, _, cx| {
+                this.toggle_select(cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &DeleteEntry, window, cx| {
+                this.delete_selected(window, cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &PasteHere, _, cx| {
+                this.paste_here(cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &CompressEntry, _, cx| {
+                this.compress_selected(cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &EntryMenu, window, cx| {
+                this.open_entry_menu(None, window, cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &MoveEntry, window, cx| {
+                this.move_selected(window, cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &ToggleButtonLabels, _, cx| {
+                this.toggle_button_labels(cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &CreateFile, window, cx| {
+                this.create_file_here(window, cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &ServerList, window, cx| {
+                this.open_server_list(window, cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &ShowHelp, window, cx| {
+                this.show_help(window, cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &ToggleLeftPanel, _, cx| {
                 this.panels
                     .update(cx, |panels, cx| panels.toggle(PanelSide::Left, cx))
             }))
-            .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| {
+            .on_action(Self::world(cx, |this, _: &ToggleRightPanel, _, cx| {
                 this.panels
                     .update(cx, |panels, cx| panels.toggle(PanelSide::Right, cx))
             }))
@@ -4600,11 +4599,10 @@ impl Render for Explorer {
                 gpui::MouseButton::Left,
                 cx.listener(|this, _e, _, cx| this.end_column_resize(cx)),
             )
-            .on_action(cx.listener(|this, _: &EditPath, window, cx| this.edit_path(window, cx)))
-            .on_action(cx.listener(|this, _: &GoParent, _, cx| {
-                if this.overlay_owns_input() {
-                    return;
-                }
+            .on_action(Self::world(cx, |this, _: &EditPath, window, cx| {
+                this.edit_path(window, cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &GoParent, _, cx| {
                 let leaving = this.cursor_name();
                 let moved = this
                     .session
@@ -4614,10 +4612,13 @@ impl Render for Explorer {
                     this.reload(cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &DeleteWorkspace, _, cx| this.delete_workspace(cx)))
-            .on_action(cx.listener(|this, _: &MoveTabToNextWorkspace, _, cx| {
-                this.move_tab_to_next_workspace(cx)
+            .on_action(Self::world(cx, |this, _: &DeleteWorkspace, _, cx| {
+                this.delete_workspace(cx)
             }))
+            .on_action(Self::world(
+                cx,
+                |this, _: &MoveTabToNextWorkspace, _, cx| this.move_tab_to_next_workspace(cx),
+            ))
             .child(self.workbench(cx))
     }
 }

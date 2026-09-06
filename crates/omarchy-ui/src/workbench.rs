@@ -739,6 +739,8 @@ fn float(
     let panels = panels.clone();
     let layer = layer
         .id(id)
+        // The scrim owns the pointer: nothing behind it reacts.
+        .occlude()
         .absolute()
         .inset_0()
         .flex()
