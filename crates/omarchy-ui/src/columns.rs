@@ -220,6 +220,14 @@ impl ColumnHeader {
     }
 }
 
+impl ColumnHeader {
+    /// How tall the header is — a row's height, so the labels sit on the
+    /// rows' rhythm. A [`crate::Headed`] uses it to place the body.
+    pub fn height(theme: &crate::Theme) -> f32 {
+        theme.space().control_height()
+    }
+}
+
 impl RenderOnce for ColumnHeader {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
@@ -228,7 +236,7 @@ impl RenderOnce for ColumnHeader {
         let dim = theme.dim_foreground();
         let fg = theme.foreground();
         let gap = space.control_gap();
-        let (height, padding) = (space.control_height(), space.row_padding_x());
+        let (height, padding) = (Self::height(theme), space.row_padding_x());
         let on_sort: Option<SharedSortHandler> = self.on_sort.map(std::rc::Rc::from);
         let sorted = self.sorted;
 

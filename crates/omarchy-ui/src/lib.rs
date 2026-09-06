@@ -283,10 +283,25 @@ impl Theme {
         space.control_height() + space.sm() * 2.0
     }
 
+    /// Where content that scrolls under a ruled [`Bar`] starts: the bar,
+    /// then the hairline under it. A body built for a [`Workbench`] side
+    /// panel pads its scrolling element by this; a [`Headed`] with more
+    /// than one head says what it needs with [`Headed::inset`].
+    pub fn bar_inset(&self) -> f32 {
+        self.bar_height() + self.space().hairline()
+    }
+
     /// The window's ground: the background, slightly translucent, so a
     /// Hyprland blur rule shows through. See [`window_options`].
     pub fn window_background(&self) -> Hsla {
         self.background().opacity(0.94)
+    }
+
+    /// The veil a bar draws over what scrolls under it: the ground, nearly
+    /// opaque, so the rows beneath show through slightly and the bar's own
+    /// items stay legible over them. See [`Headed`].
+    pub fn bar_veil(&self) -> Hsla {
+        self.background().opacity(0.95)
     }
 
     /// The dimming layer under a modal or a floating panel.

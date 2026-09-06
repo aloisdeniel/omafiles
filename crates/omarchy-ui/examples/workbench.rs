@@ -12,12 +12,13 @@
 
 use gpui::{
     App, AppContext as _, Context, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement, Render, Styled, Subscription, Window, actions, div, px,
+    KeyBinding, ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription,
+    Window, actions, div, px,
 };
 use omarchy_ui::{
     ActionBar, ActionButton, ActiveTheme as _, Bar, Breadcrumb, Column, ColumnHeader, FactSheet,
-    Icon, KeyHint, Modal, ModalSize, PanelSide, Panels, PanelsEvent, QuietRow, Row, RowLabel,
-    SectionHeader, Separator, ShortcutSheet, SidePanel, StatusBar, Workbench, spacer,
+    Headed, Icon, KeyHint, Modal, ModalSize, PanelSide, Panels, PanelsEvent, QuietRow, Row,
+    RowLabel, SectionHeader, ShortcutSheet, SidePanel, StatusBar, Workbench, spacer,
 };
 
 actions!(
@@ -95,11 +96,17 @@ impl Skeleton {
             ("\u{f07b}", "Documents"),
             ("\u{f08d}", "omafiles"),
         ];
+        // A side panel's body starts under its bar: the padding on the
+        // scrolling element is what keeps the first row clear of it.
+        let pad = cx.theme().space().sm();
         div()
+            .id("sidebar-scroll")
             .flex()
             .flex_col()
-            .w_full()
-            .py(px(cx.theme().space().sm()))
+            .size_full()
+            .pt(px(cx.theme().bar_inset() + pad))
+            .pb(px(pad))
+            .overflow_y_scroll()
             .child(SectionHeader::new("places"))
             .children(places.into_iter().enumerate().map(|(i, (glyph, label))| {
                 Row::new(("place", i))
@@ -115,20 +122,17 @@ impl Skeleton {
         let icon = cx.theme().icon_column();
         let accent = cx.theme().accent();
         let cursor = self.cursor;
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w(px(0.))
-            .min_h(px(0.))
-            .child(
+        // The bar and the column header over the rows, which scroll under
+        // them: the list pads its top by their height, and the fade under
+        // the header — no rule — lets the rows surface gradually.
+        let headed = Headed::new()
+            .bar(
                 Bar::new()
                     .child(ActionButton::new("back").glyph("\u{f060}").enabled(false))
                     .child(ActionButton::new("up").glyph("\u{f062}"))
                     .child(Breadcrumb::new(["~", "Documents", "Github", "omafiles"])),
             )
-            .child(Separator::horizontal())
-            .child(
+            .columns(
                 ColumnHeader::new()
                     .leading(icon)
                     .column(Column::flex("name"))
@@ -136,7 +140,16 @@ impl Skeleton {
                     .column(Column::fixed("age", 48.))
                     .sorted(0, false),
             )
-            .child(Separator::horizontal())
+            .faded();
+        let inset = headed.inset(cx.theme());
+        let rows = div()
+            .id("listing-scroll")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.))
+            .pt(px(inset))
+            .overflow_y_scroll()
             .children(ROWS.iter().enumerate().map(move |(i, (name, size, age))| {
                 let is_dir = name.ends_with('/');
                 let mut icon = Icon::new(if is_dir { "\u{f07b}" } else { "\u{f15b}" });
@@ -154,18 +167,26 @@ impl Skeleton {
                     .child(RowLabel::new(*name))
                     .child(div().w(px(72.)).flex_shrink_0().child(*size))
                     .child(div().w(px(48.)).flex_shrink_0().child(*age))
-            }))
+            }));
+        headed.body(rows)
     }
 
     fn detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (name, size, age) = ROWS[self.cursor];
         let pad = cx.theme().space().row_padding_x();
-        div().p(px(pad)).child(
-            FactSheet::new()
-                .title(name)
-                .fact("size", size)
-                .fact("modified", age),
-        )
+        div()
+            .id("detail-scroll")
+            .size_full()
+            .pt(px(cx.theme().bar_inset() + pad))
+            .px(px(pad))
+            .pb(px(pad))
+            .overflow_y_scroll()
+            .child(
+                FactSheet::new()
+                    .title(name)
+                    .fact("size", size)
+                    .fact("modified", age),
+            )
     }
 
     fn detail_verbs(&self, cx: &mut Context<Self>) -> impl IntoElement {

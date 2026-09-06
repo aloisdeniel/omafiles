@@ -52,7 +52,7 @@ use omafiles::session::{Session, Tab};
 use omafiles::views::{DirectoryView, Views};
 use omarchy_ui::{
     ActionBar, ActionButton, ActiveTheme as _, Badge, Bar, Breadcrumb, Column, ColumnHeader,
-    ColumnResize, ContextMenu, EmptyState, FactSheet, GripEvent, GroupHeader, Icon, Modal,
+    ColumnResize, ContextMenu, EmptyState, FactSheet, GripEvent, GroupHeader, Headed, Icon, Modal,
     ModalSize, OverflowEvent, PanelSide, Panels, PanelsEvent, QuietButton, QuietRow, Row, RowLabel,
     ScrollArea, SectionHeader, Separator, ShortcutSheet, SidePanel, SortEvent, StatusBar,
     SyntaxPalette, Workbench, drag_label, drop_highlight, modal_inset, separated, spacer,
@@ -4758,18 +4758,11 @@ impl Explorer {
         vec![finder.into_any_element(), globe.into_any_element()]
     }
 
-    /// The listing with the navigation bar on top.
+    /// The listing under the navigation bar: the rows scroll beneath it
+    /// and show through.
     fn listing_column(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w(px(0.))
-            .min_h(px(0.))
-            .child(self.nav_bar(cx))
-            .child(Separator::horizontal())
-            .child(self.listing_pane(cx))
-            .into_any_element()
+        let headed = Headed::new().bar(self.nav_bar(cx));
+        self.listing_pane(headed, cx)
     }
 
     /// The selected entry's verbs, in one order for the bar and the menu
@@ -5023,7 +5016,7 @@ impl Explorer {
     /// height, padding, gap, column widths — so the labels line up with the
     /// values. Each label is a button that sorts by its column, and the rule
     /// before the size and age labels is a grip that resizes them.
-    fn listing_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn listing_header(&mut self, cx: &mut Context<Self>) -> ColumnHeader {
         let sort = self.views.get(&self.current_path()).sort();
         let (size_width, age_width) = self.column_widths();
         // Column indexes are the sort keys' discriminants, so the two map
@@ -5046,7 +5039,6 @@ impl Explorer {
             .on_grip(cx.listener(|this, event: &GripEvent, _window, cx| {
                 this.start_column_resize(event.divider, event.x, cx)
             }))
-            .into_any_element()
     }
 
     fn sidebar_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -5277,6 +5269,8 @@ impl Explorer {
         );
 
         let pad = cx.theme().space().sm();
+        // The body starts under the panel's bar and scrolls beneath it.
+        let inset = cx.theme().bar_inset();
         // Places and tabs are two different kinds of thing — shortcuts above,
         // where-you-are below — so the rule between them gets real air, not
         // the row rhythm the sections inside each half keep.
@@ -5295,7 +5289,8 @@ impl Explorer {
                     .flex()
                     .flex_col()
                     .h_full()
-                    .py(px(pad))
+                    .pt(px(inset + pad))
+                    .pb(px(pad))
                     .overflow_y_scroll()
                     .track_scroll(&self.left_scroll)
                     // The pointer leaving every tab row takes the insertion
@@ -5319,20 +5314,26 @@ impl Explorer {
             .into_any_element()
     }
 
-    fn listing_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// The listing, finishing the heads it is handed: the column header
+    /// joins them when there are rows to label, and the rows go under the
+    /// lot. An empty state goes below instead — nothing to scroll.
+    fn listing_pane(&mut self, headed: Headed, cx: &mut Context<Self>) -> AnyElement {
         let Some(listing) = self.listing() else {
-            return EmptyState::new("reading…").into_any_element();
+            return headed
+                .body_below(EmptyState::new("reading…"))
+                .into_any_element();
         };
         let visible = listing.visible(self.show_hidden);
         let empty_reason = describe_empty(listing, self.show_hidden);
 
         if visible.is_empty() {
-            return EmptyState::new(if empty_reason.is_empty() {
-                "nothing here"
-            } else {
-                empty_reason
-            })
-            .into_any_element();
+            return headed
+                .body_below(EmptyState::new(if empty_reason.is_empty() {
+                    "nothing here"
+                } else {
+                    empty_reason
+                }))
+                .into_any_element();
         }
 
         // `cx.processor` gives the closure `&mut Self`, so rows read straight
@@ -5471,17 +5472,14 @@ impl Explorer {
         .h_full()
         .track_scroll(&self.scroll);
 
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w(px(0.))
-            // The header sits outside the scrolling area, so it stays put while
-            // the listing moves under it and the scrollbar does not run across
-            // it.
-            .child(self.listing_header(cx))
-            .child(Separator::horizontal())
-            .child(ScrollArea::new(&self.scroll).child(list))
+        // The header is one of the heads, not part of the list: it stays
+        // put while the rows move under it. The list pads its top by the
+        // heads' height, so the first row starts clear of them at rest and
+        // the rows pass under them once scrolled.
+        let headed = headed.columns(self.listing_header(cx));
+        let inset = headed.inset(cx.theme());
+        headed
+            .body(ScrollArea::new(&self.scroll).child(list.pt(px(inset))))
             .into_any_element()
     }
 
@@ -5539,13 +5537,15 @@ impl Explorer {
             });
 
         // The verbs are in the bar above (on request); the sheet reads
-        // cover, then facts. Sized by the column it sits in.
+        // cover, then facts, and starts under the bar so both scroll
+        // beneath it. Sized by the column it sits in.
         div()
             .id("detail-scroll")
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.))
+            .pt(px(cx.theme().bar_inset()))
             .overflow_y_scroll()
             .track_scroll(&self.right_scroll)
             .children(cover.is_some().then(|| {
@@ -6889,6 +6889,61 @@ impl Explorer {
             .map(|l| l.preview.name.clone())
             .unwrap_or_default();
 
+        // This pane's own bar, standing in for the navigation bar (on
+        // request): the way back where back always is, then the file's
+        // name and the keys — then the rule, and the body filling
+        // everything below and scrolling under it.
+        let headed = Headed::new().bar(
+            Bar::new()
+                .child(
+                    ActionButton::new("preview-back")
+                        .glyph("\u{f060}") // nf-fa-arrow_left
+                        .label("Back")
+                        .compact(true)
+                        .on_click(cx.listener(|this, _e, _w, cx| this.toggle_preview(cx))),
+                )
+                // The name yields first: a long one must not push the
+                // keys off the edge of the window.
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .text_size(px(caption))
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_shrink_0()
+                        .gap(px(gap))
+                        .text_size(px(caption))
+                        .text_color(dim)
+                        .child("j / k  next \u{00b7} previous")
+                        // From the keymap, not a literal: rebinding space
+                        // (M11) must not leave this hint promising a key
+                        // that no longer does it.
+                        .child({
+                            let mut keys = vec!["esc".to_string()];
+                            keys.extend(self.keymap.keys_for("toggle_preview"));
+                            format!("{}  back", keys.join(" / "))
+                        }),
+                ),
+        );
+        let inset = headed.inset(cx.theme());
+        // The body fills the area — no margin, no cap.
+        let mut scroll = div()
+            .id("preview-expanded-scroll")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.))
+            .pt(px(inset))
+            .overflow_y_scroll();
+        if let Some(ground) = ground {
+            scroll = scroll.bg(ground);
+        }
         div()
             .id("preview-expanded")
             .flex()
@@ -6896,65 +6951,7 @@ impl Explorer {
             .flex_1()
             .min_w(px(0.))
             .min_h(px(0.))
-            .child(
-                // This pane's own bar, standing in for the navigation bar
-                // (on request): the way back where back always is, then the
-                // file's name and the keys — then the rule, then the body
-                // filling everything below.
-                Bar::new()
-                    .child(
-                        ActionButton::new("preview-back")
-                            .glyph("\u{f060}") // nf-fa-arrow_left
-                            .label("Back")
-                            .compact(true)
-                            .on_click(cx.listener(|this, _e, _w, cx| this.toggle_preview(cx))),
-                    )
-                    // The name yields first: a long one must not push the
-                    // keys off the edge of the window.
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .overflow_hidden()
-                            .text_size(px(caption))
-                            .child(name),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .flex_shrink_0()
-                            .gap(px(gap))
-                            .text_size(px(caption))
-                            .text_color(dim)
-                            .child("j / k  next \u{00b7} previous")
-                            // From the keymap, not a literal: rebinding space
-                            // (M11) must not leave this hint promising a key
-                            // that no longer does it.
-                            .child({
-                                let mut keys = vec!["esc".to_string()];
-                                keys.extend(self.keymap.keys_for("toggle_preview"));
-                                format!("{}  back", keys.join(" / "))
-                            }),
-                    ),
-            )
-            .child(Separator::horizontal())
-            .child(
-                // The body fills the area — no margin, no cap.
-                {
-                    let mut scroll = div()
-                        .id("preview-expanded-scroll")
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_h(px(0.))
-                        .overflow_y_scroll();
-                    if let Some(ground) = ground {
-                        scroll = scroll.bg(ground);
-                    }
-                    scroll.child(content)
-                },
-            )
+            .child(headed.body(scroll.child(content)))
             .into_any_element()
     }
 
@@ -7662,11 +7659,17 @@ fn render_body(loaded: &Loaded, target: Target, cx: &mut App) -> AnyElement {
             // gpui-component's rich text: headings, lists, tables and fenced
             // code, the last of which is coloured by the same syntax table as a
             // source file (see `omarchy_ui::SyntaxPalette`).
-            let source = match target {
-                Target::Expanded => source.clone(),
-                Target::Pane { .. } => truncate_for_pane(source),
+            // Air around the prose: the fact sheet's inset in the pane, so
+            // the cover and the facts under it share a left edge, and the
+            // panel inset expanded, where a page wants a margin.
+            let (source, pad) = match target {
+                Target::Expanded => (source.clone(), theme.space().panel_padding()),
+                Target::Pane { .. } => (truncate_for_pane(source), theme.space().row_padding_x()),
             };
-            TextView::markdown("preview-markdown", source).into_any_element()
+            div()
+                .p(px(pad))
+                .child(TextView::markdown("preview-markdown", source))
+                .into_any_element()
         }
 
         Body::Text { text, .. } => {

@@ -27,7 +27,7 @@ use gpui::{
     px,
 };
 
-use crate::{ActiveTheme as _, Bar, QuietButton, Separator, Theme};
+use crate::{ActiveTheme as _, Bar, Headed, QuietButton, Separator, Theme};
 
 /// The two side panels, as the things that can be opened, closed and
 /// resized.
@@ -345,6 +345,10 @@ impl Panels {
 /// The bar gets the panel's collapse button appended by the [`Workbench`];
 /// put a [`crate::spacer`] last to push it to the far edge, or let the
 /// items flow if the panel's verbs already fill the bar.
+///
+/// The body goes *under* the bar, as a [`Headed`] body: its scrolling
+/// element pads its top by [`Theme::bar_inset`], and what it scrolls shows
+/// through the bar.
 pub struct SidePanel {
     bar: Vec<AnyElement>,
     body: AnyElement,
@@ -604,7 +608,7 @@ impl RenderOnce for Workbench {
     }
 }
 
-/// A docked or floating panel: its bar, a rule, its body.
+/// A docked or floating panel: its bar over its body, with a rule between.
 fn column(
     side: PanelSide,
     panel: SidePanel,
@@ -628,15 +632,10 @@ fn column(
         .w(px(width))
         .flex_shrink_0()
         .h_full()
-        .child(Bar::new().children(panel.bar).child(collapse))
-        .child(Separator::horizontal())
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h(px(0.))
-                .child(panel.body),
+            Headed::new()
+                .bar(Bar::new().children(panel.bar).child(collapse))
+                .body(panel.body),
         )
         .into_any_element()
 }
