@@ -141,6 +141,8 @@ actions!(
         ToggleSelect,
         // Settings toggles
         ToggleButtonLabels,
+        IncreaseDensity,
+        DecreaseDensity,
     ]
 );
 
@@ -175,6 +177,9 @@ fn main() {
         bind_keys(cx, &keymap);
         let config_path = config_dir().join("omafiles/config.toml");
         let config = config::Config::load(&config_path);
+        // The density is the window's, not the theme's: set once here, and
+        // the theme watcher carries it across every theme change after.
+        omarchy_ui::Theme::set_density(cx, config.density.into());
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
 
         let start = start_directory();
@@ -399,6 +404,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("^k", "command palette"),
             ("^b", "toggle the sidebar"),
             ("^\u{21e7}b", "toggle the detail panel"),
+            ("^+ / ^-", "density: normal / compact"),
             ("?", "this list"),
             ("esc", "close an overlay"),
             ("q / ^q", "quit"),
@@ -497,6 +503,8 @@ fn typed_binding(keys: &str, action: &str, context: Option<&str>) -> Option<KeyB
         "select_all" => KeyBinding::new(keys, SelectAll, context),
         "toggle_select" => KeyBinding::new(keys, ToggleSelect, context),
         "toggle_button_labels" => KeyBinding::new(keys, ToggleButtonLabels, context),
+        "increase_density" => KeyBinding::new(keys, IncreaseDensity, context),
+        "decrease_density" => KeyBinding::new(keys, DecreaseDensity, context),
         _ => return None,
     })
 }
@@ -703,6 +711,16 @@ const COMMANDS: &[Command] = &[
         label: "Toggle button labels",
         action: "toggle_button_labels",
         build: || Box::new(ToggleButtonLabels),
+    },
+    Command {
+        label: "Increase density",
+        action: "increase_density",
+        build: || Box::new(IncreaseDensity),
+    },
+    Command {
+        label: "Decrease density",
+        action: "decrease_density",
+        build: || Box::new(DecreaseDensity),
     },
     Command {
         label: "Keyboard shortcuts",
@@ -3877,6 +3895,24 @@ impl Explorer {
         cx.notify();
     }
 
+    /// `^+` / `^-` and the palette's "Increase / Decrease density": step to
+    /// `density` and keep it in the settings file. The theme change
+    /// re-renders every view, so there is nothing to re-lay out by hand. At
+    /// the end of the range already, say so rather than do nothing.
+    fn set_density(&mut self, density: omarchy_ui::Density, cx: &mut Context<Self>) {
+        if omarchy_ui::Density::from(self.config.density) == density {
+            self.inform_user(format!("already at {density} density"), cx);
+            return;
+        }
+        self.config.density = density.into();
+        omarchy_ui::Theme::set_density(cx, density);
+        match self.config.save(&self.config_path) {
+            Ok(()) => self.inform_user(format!("{density} density"), cx),
+            Err(err) => self.notify_user(format!("could not save the setting: {err}"), cx),
+        }
+        cx.notify();
+    }
+
     /// The shared location picker, opened for one of its purposes.
     fn open_path_picker(
         &mut self,
@@ -4558,6 +4594,12 @@ impl Render for Explorer {
             }))
             .on_action(Self::world(cx, |this, _: &ToggleButtonLabels, _, cx| {
                 this.toggle_button_labels(cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &IncreaseDensity, _, cx| {
+                this.set_density(omarchy_ui::Density::Normal, cx)
+            }))
+            .on_action(Self::world(cx, |this, _: &DecreaseDensity, _, cx| {
+                this.set_density(omarchy_ui::Density::Compact, cx)
             }))
             .on_action(Self::world(cx, |this, _: &CreateFile, window, cx| {
                 this.create_file_here(window, cx)

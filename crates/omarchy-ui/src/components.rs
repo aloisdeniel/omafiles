@@ -363,6 +363,9 @@ pub struct ActionButton {
     enabled: bool,
     /// Carries the accent — a state badge that is currently "on".
     accent: bool,
+    /// Painted in the accent rather than washed in the foreground: the one
+    /// verb in a bar that should stand out. See [`ActionButton::primary`].
+    primary: bool,
     /// The label is a hint, not a caption: the button is the glyph alone
     /// and the verb appears in a popover on hover. See [`ActionButton::compact`].
     compact: bool,
@@ -382,6 +385,7 @@ impl ActionButton {
             children: Vec::new(),
             enabled: true,
             accent: false,
+            primary: false,
             compact: false,
             on_click: None,
         }
@@ -420,6 +424,16 @@ impl ActionButton {
         self
     }
 
+    /// The primary variant: filled with the accent — translucent at rest,
+    /// solid under the pointer — so it stands out from the quiet verbs
+    /// around it. For the one action a bar is *for*: the confirm, the
+    /// create. As scarce as the accent itself; two primary verbs side by
+    /// side are none.
+    pub fn primary(mut self, primary: bool) -> Self {
+        self.primary = primary;
+        self
+    }
+
     pub fn on_click(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -449,7 +463,7 @@ impl ActionButton {
                 let chars = label.map_or(0, |l| l.chars().count()) as f32;
                 space.md() * 2.0
                     + border
-                    + caption * 1.2
+                    + theme.glyph_size() * 1.2
                     + space.control_gap()
                     + caption * 0.66 * chars
             }
@@ -471,12 +485,15 @@ impl RenderOnce for ActionButton {
             (self.label, None)
         };
         let square = label.is_none() && self.children.is_empty();
-        let caption = cx.theme().type_scale().caption();
+        let (caption, glyph_size) = {
+            let theme = cx.theme();
+            (theme.type_scale().caption(), theme.glyph_size())
+        };
         // A glyph alone is centred by its ink, not its advance — see
         // [`crate::glyph_ink_shift`]. Measured before the theme is borrowed
         // for the rest of the render, since the measurement caches.
         let shift = match &self.glyph {
-            Some(glyph) if square => crate::glyph_ink_shift(glyph, caption, cx),
+            Some(glyph) if square => crate::glyph_ink_shift(glyph, glyph_size, cx),
             _ => 0.0,
         };
 
@@ -487,18 +504,31 @@ impl RenderOnce for ActionButton {
         // the content around them. Derived from the scale so it tracks the
         // user's text size.
         let size = space.control_height() - space.md();
+        let enabled = self.enabled;
+        let primary = self.primary && enabled;
 
         // Two roles inside one button: the glyph is always the *secondary*
         // colour — it decorates the verb rather than being it — and the label
         // carries the readable colour (foreground, or the accent for a badge
-        // that is "on"). Disabled fades both.
-        let (glyph_color, label_color) = if !self.enabled {
+        // that is "on"). Disabled fades both. A primary verb is the
+        // exception: on an accent fill both are the one ink that reads on it.
+        let (glyph_color, label_color) = if !enabled {
             let faded = theme.dim_foreground().opacity(0.5);
             (faded, faded)
+        } else if primary {
+            let ink = theme.primary_ink();
+            (ink, ink)
         } else if self.accent {
             (theme.dim_foreground(), theme.accent())
         } else {
             (theme.dim_foreground(), theme.foreground())
+        };
+        // At rest: the quiet hairline every verb sits in, or the accent
+        // tint and edge of a primary one.
+        let (fill, edge) = if primary {
+            (theme.primary_fill(), theme.primary_border())
+        } else {
+            (gpui::transparent_black(), theme.border().opacity(0.2))
         };
 
         let button = div()
@@ -510,8 +540,9 @@ impl RenderOnce for ActionButton {
             .justify_center()
             .h(px(size))
             .gap(px(space.control_gap()))
-            // Everything inside is caption-sized — a chrome verb is an
-            // annotation on the window, not content.
+            // The label is caption-sized — a chrome verb is an annotation
+            // on the window, not content — and the glyph a size the density
+            // chooses, so the icons grow with the bars at the normal one.
             .text_size(px(caption))
             // Tighter than the window radius: a small element with the full
             // corner radius reads as a pill. Capped rather than fixed so a
@@ -522,7 +553,8 @@ impl RenderOnce for ActionButton {
             // edge for the verb to sit in, quiet enough that a bar of them
             // still reads as chrome rather than a form.
             .border(px(theme.border_width().max(1.0)))
-            .border_color(theme.border().opacity(0.2))
+            .border_color(edge)
+            .bg(fill)
             .text_color(label_color);
         let button = if square {
             button.w(px(size))
@@ -532,11 +564,21 @@ impl RenderOnce for ActionButton {
             // overflow the detail panel.
             button.px(px(space.md()))
         };
-        let enabled = self.enabled;
         // Hovered, the whole verb — glyph, label, outline — comes up to the
         // *bright* foreground: the colour a bar paints its titles in, so a
-        // lit verb sits at the same strength as the title beside it.
-        let bright = theme.bright_foreground();
+        // lit verb sits at the same strength as the title beside it. A
+        // primary verb goes solid accent instead, and its ink follows.
+        let (lit_ink, lit_edge, lit_fill, pressed_fill) = if primary {
+            (
+                theme.primary_hover_ink(),
+                theme.accent(),
+                theme.primary_hover_fill(),
+                theme.primary_pressed_fill(),
+            )
+        } else {
+            let bright = theme.bright_foreground();
+            (bright, bright, theme.hover_fill(), theme.pressed_fill())
+        };
         let mut button = button
             .group(ACTION_GROUP)
             .children(self.glyph.map(|glyph| {
@@ -550,12 +592,13 @@ impl RenderOnce for ActionButton {
                     .id("glyph")
                     .relative()
                     .left(px(-shift))
+                    .text_size(px(glyph_size))
                     .text_color(glyph_color)
                     .child(glyph);
                 // Highlighted, the glyph steps up with the label and the
                 // border: the whole button lights, not just its fill.
                 if enabled {
-                    glyph = glyph.group_hover(ACTION_GROUP, move |s| s.text_color(bright));
+                    glyph = glyph.group_hover(ACTION_GROUP, move |s| s.text_color(lit_ink));
                 }
                 glyph.into_any_element()
             }))
@@ -563,11 +606,10 @@ impl RenderOnce for ActionButton {
             .children(self.children);
 
         if enabled {
-            let (hover, pressed) = (theme.hover_fill(), theme.pressed_fill());
             button = button
                 .cursor_pointer()
-                .hover(move |s| s.bg(hover).border_color(bright).text_color(bright))
-                .active(move |s| s.bg(pressed));
+                .hover(move |s| s.bg(lit_fill).border_color(lit_edge).text_color(lit_ink))
+                .active(move |s| s.bg(pressed_fill));
             if let Some(handler) = self.on_click {
                 button = button.on_click(handler);
             }
@@ -633,10 +675,13 @@ pub(crate) type ElementAdapter = Box<dyn FnOnce(Stateful<Div>) -> Stateful<Div>>
 /// What a button is for, which decides how loudly it draws itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ButtonKind {
-    /// Bordered chrome. The default, and what most buttons should be.
+    /// Bordered chrome, washed in the foreground. The default, and what
+    /// most buttons should be.
     #[default]
-    Normal,
-    /// Carries the accent — one per view at most.
+    Secondary,
+    /// Filled with the accent — translucent at rest, solid under the
+    /// pointer — so it stands out from the secondary buttons beside it.
+    /// One per view at most.
     Primary,
     /// No chrome until interacted with, for dense toolbars.
     Ghost,
@@ -700,7 +745,7 @@ impl RenderOnce for Button {
         };
 
         let text = match self.kind {
-            ButtonKind::Primary => theme.accent(),
+            ButtonKind::Primary => theme.primary_ink(),
             ButtonKind::Danger => theme.urgent(),
             _ if self.active => theme.bright_foreground(),
             _ => theme.foreground(),
@@ -717,12 +762,27 @@ impl RenderOnce for Button {
             .text_color(text)
             .cursor_pointer();
 
-        let mut button = InteractiveSurface::new(state)
-            .chrome(chrome)
-            .paint(base, theme)
-            .hover(|s| s.bg(theme.hover_fill()))
-            .active(|s| s.bg(theme.pressed_fill()))
-            .child(self.label);
+        let mut button = match self.kind {
+            // Its own chrome rather than the surface's washes: the accent
+            // fill is the point of it, at rest and lit.
+            ButtonKind::Primary => base
+                .rounded(px(theme.radius()))
+                .bg(theme.primary_fill())
+                .border(px(theme.border_width().max(1.0)))
+                .border_color(theme.primary_border())
+                .hover(|s| {
+                    s.bg(theme.primary_hover_fill())
+                        .border_color(theme.accent())
+                        .text_color(theme.primary_hover_ink())
+                })
+                .active(|s| s.bg(theme.primary_pressed_fill())),
+            _ => InteractiveSurface::new(state)
+                .chrome(chrome)
+                .paint(base, theme)
+                .hover(|s| s.bg(theme.hover_fill()))
+                .active(|s| s.bg(theme.pressed_fill())),
+        }
+        .child(self.label);
 
         if let Some(handler) = self.on_click {
             button = button.on_click(handler);
@@ -1034,6 +1094,9 @@ impl RenderOnce for Icon {
             .relative()
             .w(px(theme.icon_column()))
             .flex_shrink_0()
+            // The density's icon size: the text's own when compact, a step
+            // above it when normal — see [`crate::Theme::icon_size`].
+            .text_size(px(theme.icon_size()))
             .text_color(self.color.unwrap_or_else(|| theme.dim_foreground()))
             .child(self.glyph)
             .children(self.badge.map(|(glyph, color)| {
@@ -1119,9 +1182,9 @@ impl QuietButton {
 
 impl RenderOnce for QuietButton {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let caption = cx.theme().type_scale().caption();
+        let glyph_size = cx.theme().glyph_size();
         // Centred by its ink — see [`crate::glyph_ink_shift`].
-        let shift = crate::glyph_ink_shift(&self.glyph, caption, cx);
+        let shift = crate::glyph_ink_shift(&self.glyph, glyph_size, cx);
         let theme = cx.theme();
         let size = theme.icon_column();
         let (hover_fill, bright, radius) = (
@@ -1139,7 +1202,7 @@ impl RenderOnce for QuietButton {
             .w(px(size))
             .h(px(size))
             .rounded(px(radius.min(2.0)))
-            .text_size(px(caption))
+            .text_size(px(glyph_size))
             .text_color(color)
             .hover(move |style| style.bg(hover_fill).text_color(bright))
             .child(div().relative().left(px(-shift)).child(self.glyph));

@@ -157,6 +157,23 @@ impl Typography {
         }
     }
 
+    /// The same scale, `factor` larger. `base_size` grows, so every derived
+    /// token grows with it, and a pinned token grows by the same factor, so a
+    /// theme's override keeps its relation to the rest. What a UI density
+    /// above the shell's own is built from.
+    pub fn scaled(&self, factor: f32) -> Self {
+        let factor = factor.max(0.0);
+        Self {
+            family: self.family.clone(),
+            base_size: (self.base_size * factor).max(1.0),
+            overrides: self
+                .overrides
+                .iter()
+                .map(|(key, value)| (key.clone(), (value * factor).round().max(1.0)))
+                .collect(),
+        }
+    }
+
     /// `Style.qml`: `fontScale = max(1/12, base_size / 12)`.
     pub fn scale(&self) -> f32 {
         (self.base_size / DEFAULT_BASE_SIZE).max(1.0 / DEFAULT_BASE_SIZE)
@@ -266,6 +283,22 @@ impl Spacing {
             .collect();
 
         Self { scale, overrides }
+    }
+
+    /// The same scale, `factor` wider. The multiplier grows, so every default
+    /// grows with it, and an explicit override grows by the same factor —
+    /// the one place a raw override *is* scaled, because a density is asked
+    /// for on top of whatever the theme pinned.
+    pub fn scaled(&self, factor: f32) -> Self {
+        let factor = factor.max(0.0);
+        Self {
+            scale: self.scale * factor,
+            overrides: self
+                .overrides
+                .iter()
+                .map(|(key, value)| (key.clone(), (value * factor).round()))
+                .collect(),
+        }
     }
 
     /// The effective multiplier: `spacing.scale × (scale-with-font ? fontScale : 1)`.
@@ -715,6 +748,35 @@ mod tests {
         let t = Typography::new("x".into(), &v);
         assert_eq!(t.heading(), 11.0, "pinned value is used raw");
         assert_eq!(t.body(), 20.0, "other tokens still scale");
+    }
+
+    #[test]
+    fn a_scaled_type_scale_grows_every_token_including_pinned_ones() {
+        let v = ShellValues::from_toml_str("[font]\nbase-size = 12\nheading = 20\n");
+        let t = Typography::new("x".into(), &v).scaled(1.5);
+        assert_eq!(t.base_size, 18.0);
+        assert_eq!(t.body(), 18.0, "derived tokens follow the base");
+        assert_eq!(t.heading(), 30.0, "a pinned token grows by the same factor");
+        assert_eq!(t.family, "x", "the family is untouched");
+    }
+
+    #[test]
+    fn a_scaled_spacing_grows_overrides_too() {
+        let v = ShellValues::from_toml_str("[spacing]\nlg = 8\n");
+        let t = Typography::new("x".into(), &v);
+        let s = Spacing::new(&v, &t).scaled(1.5);
+        assert_eq!(s.scale(), 1.5);
+        assert_eq!(s.xl(), 15.0, "a default is scaled");
+        assert_eq!(s.lg(), 12.0, "an override is scaled by the density as well");
+    }
+
+    #[test]
+    fn scaling_by_one_changes_nothing() {
+        let v = ShellValues::from_toml_str("[font]\nbase-size = 14\n\n[spacing]\nlg = 8\n");
+        let t = Typography::new("x".into(), &v);
+        let s = Spacing::new(&v, &t);
+        assert_eq!(t.scaled(1.0), t);
+        assert_eq!(s.scaled(1.0), s);
     }
 
     #[test]

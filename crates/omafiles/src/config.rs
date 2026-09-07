@@ -8,6 +8,40 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+/// How much room the UI takes: `density = "compact"` or `"normal"`.
+///
+/// `omarchy_ui`'s own type, mirrored here so the settings file has a name
+/// for it without that crate learning serde. `From` both ways keeps the two
+/// from drifting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Density {
+    /// The shell's own scale — the bar's, the menu's. The default.
+    #[default]
+    Compact,
+    /// A step up: larger type, roomier rows and bars, icons a size above
+    /// the text.
+    Normal,
+}
+
+impl From<Density> for omarchy_ui::Density {
+    fn from(density: Density) -> Self {
+        match density {
+            Density::Compact => Self::Compact,
+            Density::Normal => Self::Normal,
+        }
+    }
+}
+
+impl From<omarchy_ui::Density> for Density {
+    fn from(density: omarchy_ui::Density) -> Self {
+        match density {
+            omarchy_ui::Density::Compact => Self::Compact,
+            omarchy_ui::Density::Normal => Self::Normal,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -15,6 +49,9 @@ pub struct Config {
     /// spell out their verb beside the glyph. Off by default: a bar of
     /// glyphs reads as chrome, and the verb is one hover away.
     pub button_labels: bool,
+    /// How much room the UI takes. Compact by default, matching the shell;
+    /// normal for a roomier window with larger text and icons.
+    pub density: Density,
     /// The sidebar's width in logical pixels, as last dragged. Absent until
     /// the user resizes it; the theme's `dropdown-width` stands in until
     /// then, so a fresh install still follows the token scale.
@@ -79,11 +116,39 @@ mod tests {
         let path = scratch("roundtrip");
         let config = Config {
             button_labels: true,
+            density: Density::Normal,
             sidebar_width: Some(320),
             detail_width: None,
         };
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path), config);
+    }
+
+    #[test]
+    fn density_is_spelled_in_lowercase_and_defaults_to_compact() {
+        let path = scratch("density");
+        std::fs::write(&path, "density = \"normal\"").unwrap();
+        assert_eq!(Config::load(&path).density, Density::Normal);
+        assert_eq!(Config::default().density, Density::Compact);
+
+        Config::default().save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("density = \"compact\""), "{text}");
+    }
+
+    #[test]
+    fn an_unknown_density_is_the_defaults_not_a_crash() {
+        let path = scratch("density-unknown");
+        std::fs::write(&path, "density = \"roomy\"").unwrap();
+        assert_eq!(Config::load(&path), Config::default());
+    }
+
+    #[test]
+    fn density_maps_onto_the_design_system_and_back() {
+        for density in [Density::Compact, Density::Normal] {
+            let ui: omarchy_ui::Density = density.into();
+            assert_eq!(Density::from(ui), density);
+        }
     }
 
     #[test]

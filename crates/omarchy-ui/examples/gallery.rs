@@ -15,6 +15,8 @@
 //!
 //! Nothing should be illegible, clipped, or stale. `vantablack`, `white` and
 //! the five light themes are the ones that actually fail — check those first.
+//! The button in the header switches the density; walk the corpus at both.
+//! `OMARCHY_UI_DENSITY=normal` opens at the roomier one, for a script.
 //!
 //! The mechanical half of the criterion — contrast across all 22 themes — is
 //! `tests/legibility.rs`, which does not need a display.
@@ -26,13 +28,19 @@ use gpui::{
 use omarchy_ui::{
     ActionButton, ActiveTheme as _, Badge, Bar, Breadcrumb, Button, ButtonKind, Chrome, Column,
     ColumnHeader, EmptyState, FactSheet, GroupHeader, Icon, InteractiveSurface, KeyHint, Panel,
-    QuietButton, QuietRow, Row, RowLabel, SectionHeader, Separator, StatusBar, SurfaceState,
+    QuietButton, QuietRow, Row, RowLabel, SectionHeader, Separator, StatusBar, SurfaceState, Theme,
     spacer,
 };
 
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
         omarchy_ui::init(cx);
+        if let Some(density) = std::env::var("OMARCHY_UI_DENSITY")
+            .ok()
+            .and_then(|text| text.parse().ok())
+        {
+            Theme::set_density(cx, density);
+        }
         let options =
             omarchy_ui::window_options("dev.omarchy.omafiles.gallery", "omarchy-ui gallery");
         cx.open_window(options, |_window, cx| cx.new(Gallery::new))
@@ -72,11 +80,12 @@ impl Render for Gallery {
                 theme.gap().max(theme.space().md()),
                 theme.space().panel_gap(),
                 format!(
-                    "· {} · {:?} · {}px · ×{:.2}",
+                    "· {} · {:?} · {}px · ×{:.2} · {}",
                     theme.tokens.theme_name,
                     theme.tokens.palette.mode(),
                     t.base_size,
                     theme.space().scale(),
+                    theme.density(),
                 ),
             )
         };
@@ -126,6 +135,7 @@ impl Render for Gallery {
 
 fn header(cx: &mut App) -> impl IntoElement {
     let theme = cx.theme();
+    let density = theme.density();
     div()
         .flex()
         .flex_row()
@@ -140,7 +150,17 @@ fn header(cx: &mut App) -> impl IntoElement {
                 .gap(px(theme.space().control_gap()))
                 .child(Badge::new("12 items"))
                 .child(Badge::new("serving :8080").accent())
-                .child(Badge::new("2 errors").urgent()),
+                .child(Badge::new("2 errors").urgent())
+                // The density switch: every component below resizes, and
+                // the theme's own change path is what carries it.
+                .child(
+                    ActionButton::new("density")
+                        .glyph("\u{f065}") // nf-fa-expand
+                        .label(format!("{density} density"))
+                        .on_click(move |_event, _window, cx| {
+                            Theme::set_density(cx, density.toggled());
+                        }),
+                ),
         )
 }
 
@@ -199,7 +219,7 @@ fn controls_panel(cx: &mut App) -> impl IntoElement {
             .flex_wrap()
             .items_center()
             .gap(px(theme.space().control_gap()))
-            .child(Button::new("btn-normal", "Normal"))
+            .child(Button::new("btn-secondary", "Secondary"))
             .child(Button::new("btn-primary", "Primary").kind(ButtonKind::Primary))
             .child(Button::new("btn-ghost", "Ghost").kind(ButtonKind::Ghost))
             .child(Button::new("btn-danger", "Delete").kind(ButtonKind::Danger))
@@ -233,6 +253,21 @@ fn controls_panel(cx: &mut App) -> impl IntoElement {
                     .glyph("\u{f0ac}")
                     .label(":8080")
                     .accent(true),
+            )
+            // The primary verb, with and without its word: the accent fill
+            // at rest, solid under the pointer.
+            .child(
+                ActionButton::new("act-primary")
+                    .glyph("\u{f067}")
+                    .label("New")
+                    .primary(true),
+            )
+            .child(
+                ActionButton::new("act-primary-glyph")
+                    .glyph("\u{f067}")
+                    .label("New")
+                    .compact(true)
+                    .primary(true),
             ),
     )
 }

@@ -7,7 +7,8 @@
 //! Three layers, from the bottom up:
 //!
 //! - **Tokens.** The [`Theme`] global, colour conversion, [`observe_theme`], and
-//!   live tracking of the system theme.
+//!   live tracking of the system theme — sized by a [`Density`], compact
+//!   like the shell or a step up from it.
 //! - **Components.** [`InteractiveSurface`] and the kit built on it: rows,
 //!   buttons, bars, headers, modals, menus, sheets.
 //! - **Layout.** [`Workbench`] — the three-column shell with collapsible,
@@ -26,6 +27,7 @@ mod bars;
 mod columns;
 mod components;
 mod contrast;
+mod density;
 mod drag;
 mod glyphs;
 mod grain;
@@ -49,6 +51,7 @@ pub use components::{
 pub use contrast::{
     MIN_PRIMARY_CONTRAST, MIN_SECONDARY_CONTRAST, best_of, contrast_ratio, ensure_contrast,
 };
+pub use density::Density;
 pub use drag::{DragLabel, drag_label, drop_highlight};
 pub use glyphs::glyph_ink_shift;
 pub use grain::{Frosted, GrainStyle, paint_grain};
@@ -149,7 +152,12 @@ impl<T> ActiveTheme for gpui::Context<'_, T> {
 /// subscribe and hold the returned [`gpui::Subscription`]; dropping it
 /// silently unsubscribes. Use [`observe_theme`] rather than writing it by hand.
 pub struct Theme {
+    /// The tokens as the UI uses them: the shell's, sized by the density.
     pub tokens: Tokens,
+    /// The tokens as the shell has them, kept so a density switch can be
+    /// applied again from the same starting point.
+    base: Tokens,
+    density: Density,
     /// Resolved once per theme rather than per rendered file: the table is 40
     /// contrast computations, and a preview re-renders on every cursor move.
     syntax: syntax::SyntaxPalette,
@@ -158,11 +166,36 @@ pub struct Theme {
 impl Global for Theme {}
 
 impl Theme {
+    /// At the default density — compact, the shell's own.
     pub fn new(tokens: Tokens) -> Self {
+        Self::with_density(tokens, Density::default())
+    }
+
+    /// The shell's tokens, sized for `density`.
+    pub fn with_density(base: Tokens, density: Density) -> Self {
+        let tokens = density.apply(&base);
         Self {
             syntax: syntax::SyntaxPalette::new(&tokens.palette),
             tokens,
+            base,
+            density,
         }
+    }
+
+    /// How much room the UI takes. See [`Density`].
+    pub fn density(&self) -> Density {
+        self.density
+    }
+
+    /// Switch the density of the installed theme. Every subscribed view
+    /// re-renders, like on a theme change, and the watcher keeps the new
+    /// density across the theme changes that follow.
+    pub fn set_density(cx: &mut App, density: Density) {
+        if cx.theme().density == density {
+            return;
+        }
+        let base = cx.theme().base.clone();
+        cx.set_global(Self::with_density(base, density));
     }
 
     /// Syntax colours for this theme. See [`SyntaxPalette`].
@@ -240,8 +273,12 @@ impl Theme {
         cx.spawn(async move |cx| {
             while let Some(tokens) = rx.next().await {
                 // `set_global` notifies observers; every themed view re-renders
-                // through its `observe_theme` subscription.
-                cx.update(|cx| cx.set_global(Theme::new(tokens)));
+                // through its `observe_theme` subscription. The density is the
+                // app's choice, not the theme's, so it survives the swap.
+                cx.update(|cx| {
+                    let density = cx.theme().density;
+                    cx.set_global(Theme::with_density(tokens, density));
+                });
             }
         })
         .detach();
@@ -276,10 +313,35 @@ impl Theme {
     }
 
     /// The width of a glyph column — the icon before a row's label, a
-    /// borderless glyph button. A multiple of the caption size, so it scales
-    /// with `omarchy display text size` like everything else.
+    /// borderless glyph button. A multiple of a type size, so it scales
+    /// with `omarchy display text size` like everything else; at the normal
+    /// density it follows the larger icon rather than the caption.
     pub fn icon_column(&self) -> f32 {
-        self.type_scale().caption() * 1.6
+        match self.density {
+            Density::Compact => self.type_scale().caption() * 1.6,
+            Density::Normal => self.icon_size() * 1.5,
+        }
+    }
+
+    /// The size of an [`Icon`] — the glyph before a row's label. At the
+    /// text's own size when compact, so the glyph sits in the line like a
+    /// character; a size above it when normal, so the icons read as icons.
+    pub fn icon_size(&self) -> f32 {
+        match self.density {
+            Density::Compact => self.type_scale().body(),
+            Density::Normal => self.type_scale().icon(),
+        }
+    }
+
+    /// The size of a chrome glyph — an [`ActionButton`]'s or a
+    /// [`QuietButton`]'s. Caption-sized when compact, since the verb is an
+    /// annotation on the window; body-sized when normal, so the glyphs grow
+    /// with the bars they sit in.
+    pub fn glyph_size(&self) -> f32 {
+        match self.density {
+            Density::Compact => self.type_scale().caption(),
+            Density::Normal => self.type_scale().body(),
+        }
     }
 
     /// The height every top bar shares — one over each panel — so the rule
@@ -441,6 +503,63 @@ impl Theme {
     pub fn border_width(&self) -> f32 {
         self.tokens.controls.normal.border_width
     }
+
+    // --------------------------------------------------------- primary controls
+    //
+    // A primary control is painted in the accent rather than washed in the
+    // foreground: the fill is what makes it stand out from the quiet chrome
+    // around it. Translucent at rest — an accent tint over the ground — and
+    // solid under the pointer, so hovering it is the one moment it is fully
+    // the accent. The ink on it is chosen by contrast against the fill it
+    // actually sits on, because whether the accent is light or dark on the
+    // ground is the theme's decision, not ours.
+
+    /// How much of the accent shows through a primary control at rest.
+    const PRIMARY_REST_ALPHA: f32 = 0.35;
+
+    /// A primary control's fill at rest: the accent, translucent.
+    pub fn primary_fill(&self) -> Hsla {
+        self.accent().opacity(Self::PRIMARY_REST_ALPHA)
+    }
+    /// A primary control's fill under the pointer: the accent, solid.
+    pub fn primary_hover_fill(&self) -> Hsla {
+        self.accent()
+    }
+    /// A primary control's fill while pressed: a touch back from solid, so
+    /// the press registers as a change.
+    pub fn primary_pressed_fill(&self) -> Hsla {
+        self.accent().opacity(0.8)
+    }
+    /// A primary control's edge at rest — stronger than the fill, so the
+    /// control is outlined in the accent even where the tint is faint.
+    pub fn primary_border(&self) -> Hsla {
+        self.accent().opacity(0.7)
+    }
+    /// The ink on a primary control at rest: the foreground or the ground,
+    /// whichever reads better on the accent tint over the window.
+    pub fn primary_ink(&self) -> Hsla {
+        let palette = &self.tokens.palette;
+        let tint = palette
+            .background()
+            .mix(palette.accent(), Self::PRIMARY_REST_ALPHA);
+        color(contrast::best_of(
+            tint,
+            palette.bright_foreground(),
+            palette.background(),
+        ))
+    }
+    /// The ink on a primary control under the pointer: whichever of the two
+    /// reads better on the solid accent — usually the ground, since most
+    /// accents are lighter than a dark theme's background and darker than a
+    /// light one's.
+    pub fn primary_hover_ink(&self) -> Hsla {
+        let palette = &self.tokens.palette;
+        color(contrast::best_of(
+            palette.accent(),
+            palette.background(),
+            palette.bright_foreground(),
+        ))
+    }
 }
 
 /// Convert an Omarchy colour into gpui's.
@@ -509,6 +628,36 @@ mod tests {
         assert_eq!(tokens.typography.base_size, 12.0);
         assert_eq!(tokens.typography.body(), 12.0);
         assert_eq!(tokens.spacing.lg(), 8.0);
+    }
+
+    #[test]
+    fn a_theme_keeps_the_shell_tokens_under_its_density() {
+        let base = fallback_tokens();
+        let theme = Theme::with_density(base.clone(), Density::Normal);
+        assert_eq!(theme.density(), Density::Normal);
+        assert_eq!(theme.base, base, "the shell's tokens are kept as they were");
+        assert_eq!(theme.tokens, Density::Normal.apply(&base));
+        assert!(theme.bar_height() > Theme::new(base).bar_height());
+    }
+
+    #[test]
+    fn icons_step_up_a_size_at_the_normal_density() {
+        let compact = Theme::new(fallback_tokens());
+        let normal = Theme::with_density(fallback_tokens(), Density::Normal);
+        assert_eq!(compact.icon_size(), compact.type_scale().body());
+        assert_eq!(normal.icon_size(), normal.type_scale().icon());
+        assert!(normal.icon_size() > normal.type_scale().body());
+        assert!(normal.icon_column() > compact.icon_column());
+        assert!(normal.glyph_size() > compact.glyph_size());
+    }
+
+    #[test]
+    fn primary_ink_reads_on_its_fill() {
+        // On the fallback (dark, light accent) the rest tint is dark, so the
+        // ink is the foreground; hovered, the solid accent takes the ground.
+        let theme = Theme::new(fallback_tokens());
+        assert_eq!(theme.primary_ink(), theme.bright_foreground());
+        assert_eq!(theme.primary_hover_ink(), theme.background());
     }
 
     #[test]

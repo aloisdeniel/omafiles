@@ -108,6 +108,11 @@ pub const DEFAULTS: &[(&str, &str, Context)] = &[
     ("add_network",       "ctrl-shift-n",   Context::Global),
     ("command_palette",   "ctrl-k",         Context::Global),
     ("quit",              "ctrl-q",         Context::Global),
+    // Density, browser-style: `+` is shift-= on most layouts, so `=` is
+    // bound too — ctrl-= steps up as ctrl-+ does. `--` is gpui's `-` key.
+    ("increase_density",  "ctrl-+",         Context::Global),
+    ("increase_density",  "ctrl-=",         Context::Global),
+    ("decrease_density",  "ctrl--",         Context::Global),
     // Driving a modal's list from inside its text field — bound globally
     // because gpui-component's Input sets no key context (see bind_keys).
     ("move_down",         "down",           Context::Global),

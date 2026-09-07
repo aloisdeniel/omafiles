@@ -50,6 +50,17 @@ impl Tokens {
     pub fn mode(&self) -> Mode {
         self.palette.mode()
     }
+
+    /// A copy with the type scale `font` times larger and the spacing `space`
+    /// times wider. The palette, the control states and the surfaces are
+    /// untouched: a density is a size, not a colour.
+    pub fn scaled(&self, font: f32, space: f32) -> Self {
+        Self {
+            typography: self.typography.scaled(font),
+            spacing: self.spacing.scaled(space),
+            ..self.clone()
+        }
+    }
 }
 
 /// Corner radius and edge gap, both owned by Hyprland rather than by the theme.
