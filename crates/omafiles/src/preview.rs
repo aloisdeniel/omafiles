@@ -325,7 +325,7 @@ enum Class {
 /// Names it does not know degrade to unhighlighted text rather than failing, so
 /// listing an extension here is never a risk — the worst case is that it stays
 /// plain until the grammar is enabled in `Cargo.toml`.
-const LANGUAGES: &[(&str, &str)] = &[
+pub(crate) const LANGUAGES: &[(&str, &str)] = &[
     ("rs", "rust"),
     ("toml", "toml"),
     ("json", "json"),
@@ -359,7 +359,7 @@ const LANGUAGES: &[(&str, &str)] = &[
 ];
 
 /// Extensions that are text but have no grammar enabled.
-const PLAIN_TEXT: &[&str] = &[
+pub(crate) const PLAIN_TEXT: &[&str] = &[
     "txt",
     "log",
     "cfg",
@@ -388,11 +388,11 @@ const PLAIN_TEXT: &[&str] = &[
     "tex",
 ];
 
-const IMAGES: &[&str] = &[
+pub(crate) const IMAGES: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "tif", "avif", "qoi", "hdr", "exr",
 ];
 
-const VIDEOS: &[&str] = &[
+pub(crate) const VIDEOS: &[&str] = &[
     "mp4", "mkv", "webm", "mov", "avi", "m4v", "wmv", "flv", "mpg", "mpeg", "ogv",
 ];
 
@@ -402,19 +402,23 @@ pub fn is_image(path: &Path) -> bool {
     matches!(classify(path), Class::Image)
 }
 
-fn classify(path: &Path) -> Class {
-    // `.gitignore` has no stem, so its "extension" is None and the name is the
-    // extension. Checking both is what makes dotfiles preview as text.
-    let extension = path
-        .extension()
+/// The extension the rules are keyed by, lowercased.
+///
+/// `.gitignore` has no stem, so its "extension" is None and the name is the
+/// extension. Checking both is what makes dotfiles preview as text. Shared
+/// with [`crate::family`], so a file is drawn as what it previews as.
+pub(crate) fn extension_of(path: &Path) -> Option<String> {
+    path.extension()
         .or_else(|| {
             path.file_name()
                 .and_then(|n| n.to_str()?.strip_prefix('.').map(|s| s.as_ref()))
         })
         .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase);
+        .map(str::to_ascii_lowercase)
+}
 
-    let Some(extension) = extension else {
+fn classify(path: &Path) -> Class {
+    let Some(extension) = extension_of(path) else {
         return Class::Unknown;
     };
 

@@ -4,7 +4,9 @@
 //! title over label/value pairs. A [`ShortcutSheet`] is the help page every
 //! keyboard-first app owes its user: the bindings by group, searchable.
 
-use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div, px};
+use gpui::{
+    App, Hsla, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div, px,
+};
 
 use crate::ActiveTheme as _;
 
@@ -13,7 +15,15 @@ use crate::ActiveTheme as _;
 #[derive(IntoElement)]
 pub struct FactSheet {
     title: Option<SharedString>,
-    facts: Vec<(SharedString, SharedString)>,
+    facts: Vec<Fact>,
+}
+
+/// One row of a [`FactSheet`]: the label, the value, and the value's
+/// colour when it has one to wear — a kind in its hue.
+struct Fact {
+    label: SharedString,
+    value: SharedString,
+    color: Option<Hsla>,
 }
 
 impl FactSheet {
@@ -30,7 +40,28 @@ impl FactSheet {
     }
 
     pub fn fact(mut self, label: impl Into<SharedString>, value: impl Into<SharedString>) -> Self {
-        self.facts.push((label.into(), value.into()));
+        self.facts.push(Fact {
+            label: label.into(),
+            value: value.into(),
+            color: None,
+        });
+        self
+    }
+
+    /// A fact whose value wears a colour — the kind of a file in its hue,
+    /// so the sheet says what the icon says. Scarce: a sheet of coloured
+    /// values is a rainbow, not a table.
+    pub fn fact_in(
+        mut self,
+        label: impl Into<SharedString>,
+        value: impl Into<SharedString>,
+        color: Hsla,
+    ) -> Self {
+        self.facts.push(Fact {
+            label: label.into(),
+            value: value.into(),
+            color: Some(color),
+        });
         self
     }
 
@@ -38,8 +69,11 @@ impl FactSheet {
         mut self,
         facts: impl IntoIterator<Item = (impl Into<SharedString>, impl Into<SharedString>)>,
     ) -> Self {
-        self.facts
-            .extend(facts.into_iter().map(|(l, v)| (l.into(), v.into())));
+        self.facts.extend(facts.into_iter().map(|(l, v)| Fact {
+            label: l.into(),
+            value: v.into(),
+            color: None,
+        }));
         self
     }
 }
@@ -72,15 +106,19 @@ impl RenderOnce for FactSheet {
                     .text_color(bright)
                     .child(title)
             }))
-            .children(self.facts.into_iter().map(|(label, value)| {
+            .children(self.facts.into_iter().map(|fact| {
+                let mut value = div();
+                if let Some(color) = fact.color {
+                    value = value.text_color(color);
+                }
                 div()
                     .flex()
                     .flex_row()
                     .justify_between()
                     .gap(px(gap))
                     .text_size(px(caption))
-                    .child(div().text_color(dim).child(label))
-                    .child(div().child(value))
+                    .child(div().text_color(dim).child(fact.label))
+                    .child(value.child(fact.value))
             }))
     }
 }

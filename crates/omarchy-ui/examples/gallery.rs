@@ -27,9 +27,9 @@ use gpui::{
 };
 use omarchy_ui::{
     ActionButton, ActiveTheme as _, Badge, Bar, Breadcrumb, Button, ButtonKind, Chrome, Column,
-    ColumnHeader, EmptyState, FactSheet, GroupHeader, Icon, InteractiveSurface, KeyHint, Panel,
-    QuietButton, QuietRow, Row, RowLabel, SectionHeader, Separator, StatusBar, SurfaceState, Theme,
-    spacer,
+    ColumnHeader, EmptyState, FactSheet, GroupHeader, Hue, Icon, InteractiveSurface, KeyHint,
+    Panel, QuietButton, QuietRow, Row, RowLabel, SectionHeader, Separator, StatusBar, SurfaceState,
+    Theme, spacer,
 };
 
 fn main() {
@@ -275,12 +275,37 @@ fn controls_panel(cx: &mut App) -> impl IntoElement {
 /// A miniature file listing, which is what `Row` actually exists for.
 fn rows_panel(cx: &mut App) -> impl IntoElement {
     let theme = cx.theme();
+    // Each row's icon in the hue its kind wears: the theme's blue for a
+    // directory, green for code, magenta for a picture, yellow for an
+    // archive, and none for plain text — what `omafiles` draws.
     let entries = [
-        ("crates/", "—", true, false),
-        ("plan/", "—", false, false),
-        ("Cargo.toml", "412 B", false, true),
-        ("README.md", "37 B", false, false),
-        (".gitignore", "24 B", false, false),
+        ("crates/", "—", true, false, "\u{f07b}", Some(Hue::Blue)),
+        ("plan/", "—", false, false, "\u{f07b}", Some(Hue::Blue)),
+        (
+            "Cargo.toml",
+            "412 B",
+            false,
+            true,
+            "\u{f1c9}",
+            Some(Hue::Green),
+        ),
+        (
+            "logo.png",
+            "9.1 K",
+            false,
+            false,
+            "\u{f1c5}",
+            Some(Hue::Magenta),
+        ),
+        (
+            "site.zip",
+            "2.3 M",
+            false,
+            false,
+            "\u{f1c6}",
+            Some(Hue::Yellow),
+        ),
+        (".gitignore", "24 B", false, false, "\u{f15c}", None),
     ];
 
     Panel::new()
@@ -291,12 +316,17 @@ fn rows_panel(cx: &mut App) -> impl IntoElement {
                 .flex()
                 .flex_col()
                 .children(entries.into_iter().enumerate().map(
-                    |(index, (name, size, selected, cursor))| {
+                    |(index, (name, size, selected, cursor, glyph, hue))| {
+                        let mut icon = Icon::new(glyph);
+                        if let Some(hue) = hue {
+                            icon = icon.color(theme.hue(hue));
+                        }
                         Row::new(("entry", index))
                             .selected(selected)
                             .cursor(cursor)
                             .focused(true)
-                            .child(div().flex_1().child(name))
+                            .child(icon)
+                            .child(RowLabel::new(name))
                             .child(
                                 div()
                                     .text_size(px(theme.type_scale().caption()))

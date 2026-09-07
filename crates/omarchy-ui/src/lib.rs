@@ -31,6 +31,7 @@ mod density;
 mod drag;
 mod glyphs;
 mod grain;
+mod hue;
 mod interactive;
 mod interop;
 mod menu;
@@ -55,6 +56,7 @@ pub use density::Density;
 pub use drag::{DragLabel, drag_label, drop_highlight};
 pub use glyphs::glyph_ink_shift;
 pub use grain::{Frosted, GrainStyle, paint_grain};
+pub use hue::Hue;
 pub use interactive::{Chrome, InteractiveSurface, SurfaceState};
 pub use interop::sync_gpui_component;
 pub use menu::{ContextMenu, GroupHeader, modal_inset, separated};
@@ -462,6 +464,26 @@ impl Theme {
         color(self.tokens.palette.dark_foreground())
     }
 
+    // ------------------------------------------------------------------ hues
+
+    /// One of the palette's named hues, on the window ground. See [`Hue`].
+    ///
+    /// Held to the secondary floor, like dim text: a hue says what kind of
+    /// thing an element is, and one that vanishes into the ground says
+    /// nothing. On nearly every theme this is the palette value untouched.
+    pub fn hue(&self, hue: Hue) -> Hsla {
+        self.hue_on(hue, self.tokens.palette.background())
+    }
+
+    /// A hue on an arbitrary ground — a panel, a filled row.
+    pub fn hue_on(&self, hue: Hue, background: Rgb) -> Hsla {
+        color(contrast::ensure_contrast(
+            hue.resolve(&self.tokens.palette),
+            background,
+            contrast::MIN_SECONDARY_CONTRAST,
+        ))
+    }
+
     // ------------------------------------------------------- interaction fills
     //
     // Omarchy states are alpha washes over the background rather than solid
@@ -658,6 +680,24 @@ mod tests {
         let theme = Theme::new(fallback_tokens());
         assert_eq!(theme.primary_ink(), theme.bright_foreground());
         assert_eq!(theme.primary_hover_ink(), theme.background());
+    }
+
+    #[test]
+    fn a_hue_that_hides_in_the_ground_is_lifted_out_of_it() {
+        let theme = Theme::new(fallback_tokens());
+        let ground = theme.tokens.palette.background();
+        for hue in Hue::ALL {
+            let shown: Rgba = theme.hue(hue).into();
+            let shown = Rgb::new(
+                (shown.r * 255.0).round() as u8,
+                (shown.g * 255.0).round() as u8,
+                (shown.b * 255.0).round() as u8,
+            );
+            assert!(
+                contrast_ratio(shown, ground) >= MIN_SECONDARY_CONTRAST - 0.05,
+                "{hue:?} reads on the ground"
+            );
+        }
     }
 
     #[test]

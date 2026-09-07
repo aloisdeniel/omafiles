@@ -36,6 +36,7 @@ use gpui_component::text::TextView;
 use omafiles::actions;
 use omafiles::config;
 use omafiles::entry::{Entry, Kind, format_age, format_size, natural_cmp, nearest_existing};
+use omafiles::family::Family;
 use omafiles::fileops;
 use omafiles::git;
 use omafiles::grep;
@@ -52,9 +53,9 @@ use omafiles::session::{Session, Tab};
 use omafiles::views::{DirectoryView, Views};
 use omarchy_ui::{
     ActionBar, ActionButton, ActiveTheme as _, Badge, Bar, Breadcrumb, Column, ColumnHeader,
-    ColumnResize, ContextMenu, EmptyState, FactSheet, GripEvent, GroupHeader, Headed, Icon, Modal,
-    ModalSize, OverflowEvent, PanelSide, Panels, PanelsEvent, QuietButton, QuietRow, Row, RowLabel,
-    ScrollArea, SectionHeader, Separator, ShortcutSheet, SidePanel, SortEvent, StatusBar,
+    ColumnResize, ContextMenu, EmptyState, FactSheet, GripEvent, GroupHeader, Headed, Hue, Icon,
+    Modal, ModalSize, OverflowEvent, PanelSide, Panels, PanelsEvent, QuietButton, QuietRow, Row,
+    RowLabel, ScrollArea, SectionHeader, Separator, ShortcutSheet, SidePanel, SortEvent, StatusBar,
     SyntaxPalette, Workbench, drag_label, drop_highlight, modal_inset, separated, spacer,
 };
 
@@ -5102,20 +5103,26 @@ impl Explorer {
                 column = column.child(SectionHeader::new("pinned"));
             }
             let dest = place.path.clone();
-            let row = place_row(index, &place, cursor == index && focused, focused)
-                .on_click(cx.listener(move |this, _event, window, cx| {
-                    // A place is a shortcut, so one click goes there. Focus lands
-                    // in the listing, because browsing is what you do next.
-                    this.place_cursor = index;
-                    this.open_place(cx);
-                    this.focus_pane(Pane::Listing, window, cx);
-                }))
-                // And somewhere to drop: entries dragged onto a place move
-                // into its directory.
-                .drag_over::<DraggedEntries>(drop_highlight)
-                .on_drop(cx.listener(move |this, dragged: &DraggedEntries, _w, cx| {
-                    this.drop_entries(dragged, dest.clone(), cx);
-                }));
+            let row = place_row(
+                index,
+                &place,
+                cursor == index && focused,
+                focused,
+                cx.theme(),
+            )
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                // A place is a shortcut, so one click goes there. Focus lands
+                // in the listing, because browsing is what you do next.
+                this.place_cursor = index;
+                this.open_place(cx);
+                this.focus_pane(Pane::Listing, window, cx);
+            }))
+            // And somewhere to drop: entries dragged onto a place move
+            // into its directory.
+            .drag_over::<DraggedEntries>(drop_highlight)
+            .on_drop(cx.listener(move |this, dragged: &DraggedEntries, _w, cx| {
+                this.drop_entries(dragged, dest.clone(), cx);
+            }));
             column = column.child(row);
         }
 
@@ -5127,7 +5134,9 @@ impl Explorer {
             for (index, location) in locations.into_iter().enumerate() {
                 column = column.child(
                     Row::new(("network", index))
-                        .child(Icon::new("\u{f233}")) // nf-fa-server
+                        // Cyan: a place that is elsewhere, distinct from the
+                        // blue of a directory on this machine.
+                        .child(Icon::new("\u{f233}").color(cx.theme().hue(Hue::Cyan))) // nf-fa-server
                         .child(RowLabel::new(location.name.clone()))
                         .on_click(cx.listener(move |this, _e, window, cx| {
                             this.open_network(index, cx);
@@ -7005,9 +7014,13 @@ impl Explorer {
             .unwrap_or((0, 0));
         // Copied out rather than held: `git_bar` needs the context back, and a
         // live `cx.theme()` borrow is what stops it.
-        let (dim, urgent) = {
+        let (dim, urgent, lit) = {
             let theme = cx.theme();
-            (theme.dim_foreground(), theme.urgent())
+            (
+                theme.dim_foreground(),
+                theme.urgent(),
+                theme.hue(Hue::Yellow),
+            )
         };
         let git = self.git_bar(cx);
         let marked = self.selected_count();
@@ -7015,9 +7028,14 @@ impl Explorer {
 
         StatusBar::new()
             .leading(div().child(format!("{dirs} directories · {files} files")))
-            .leading_all(
-                (marked > 0).then(|| div().child(format!("{marked} selected")).into_any_element()),
-            )
+            // The selection is what the next verb acts on, so its count is
+            // lit — yellow, the hue of something marked.
+            .leading_all((marked > 0).then(|| {
+                div()
+                    .text_color(lit)
+                    .child(format!("{marked} selected"))
+                    .into_any_element()
+            }))
             .leading_all(git)
             // What the last action had to say for itself (M9). One line,
             // urgent, gone again in a few seconds.
@@ -7129,7 +7147,7 @@ impl Explorer {
 
         // Everything the theme is needed for, resolved before `cx.listener`
         // wants the context back.
-        let (bright, caption, marks) = {
+        let (branch, caption, marks) = {
             let theme = cx.theme();
             let marks: Vec<(String, gpui::Hsla)> = counts
                 .into_iter()
@@ -7143,7 +7161,9 @@ impl Explorer {
                 })
                 .collect();
             (
-                theme.bright_foreground(),
+                // Magenta, as a prompt writes a branch: a fact about where
+                // you are, in a colour nothing else in the bar uses.
+                theme.hue(Hue::Magenta),
                 theme.type_scale().caption(),
                 marks,
             )
@@ -7156,7 +7176,7 @@ impl Explorer {
         Some(
             ActionButton::new("git")
                 .glyph("\u{e0a0}") // nf-pl-branch
-                .child(div().text_size(px(caption)).text_color(bright).child(label))
+                .child(div().text_size(px(caption)).text_color(branch).child(label))
                 .children(marks.into_iter().map(|(text, colour)| {
                     div().text_size(px(caption)).text_color(colour).child(text)
                 }))
@@ -7170,18 +7190,33 @@ impl Explorer {
 /// No "you are here" highlight (revised on request): the tab list already
 /// says where you are, and a place click now selects or opens a tab rather
 /// than navigating one, so a lit place would repeat the tab row above it.
-fn place_row(index: usize, place: &Place, is_cursor: bool, pane_focused: bool) -> Row {
-    let glyph = match place.origin {
-        Origin::Home => "\u{f015}",   // nf-fa-home
-        Origin::Config => "\u{f013}", // nf-fa-cog
-        Origin::Xdg => "\u{f07b}",    // nf-fa-folder
-        Origin::Pinned => "\u{f08d}", // nf-fa-thumb_tack
+///
+/// The icons wear the listing's hues, so the sidebar says the same thing
+/// the listing does: a directory is blue, and a pin is the yellow of
+/// something kept. The config directory stays in the secondary colour — a
+/// cog is a cog.
+fn place_row(
+    index: usize,
+    place: &Place,
+    is_cursor: bool,
+    pane_focused: bool,
+    theme: &omarchy_ui::Theme,
+) -> Row {
+    let (glyph, hue) = match place.origin {
+        Origin::Home => ("\u{f015}", Some(Hue::Blue)), // nf-fa-home
+        Origin::Config => ("\u{f013}", None),          // nf-fa-cog
+        Origin::Xdg => ("\u{f07b}", Some(Hue::Blue)),  // nf-fa-folder
+        Origin::Pinned => ("\u{f08d}", Some(Hue::Yellow)), // nf-fa-thumb_tack
     };
+    let mut icon = Icon::new(glyph);
+    if let Some(hue) = hue {
+        icon = icon.color(theme.hue(hue));
+    }
 
     Row::new(("place", index))
         .cursor(is_cursor)
         .focused(pane_focused)
-        .child(Icon::new(glyph))
+        .child(icon)
         .child(RowLabel::new(place.label.clone()))
 }
 
@@ -7280,10 +7315,10 @@ fn tab_row(
         // The close box carries its own inset; the row's would double it.
         row = row.padding_right(theme.space().sm());
     }
+    // A tab is a directory, so its icon is the listing's blue; the active
+    // one is where you are, and takes the accent.
     let mut icon = Icon::new("\u{f114}"); // nf-fa-folder_o
-    if active {
-        icon = icon.color(accent);
-    }
+    icon = icon.color(if active { accent } else { theme.hue(Hue::Blue) });
     row.draggable(DraggedTab { workspace, index }, {
         let label = label.clone();
         move |_payload, _position, _window, cx: &mut App| drag_label(label.clone(), cx)
@@ -7385,28 +7420,28 @@ fn entry_row(
     let theme = cx.theme();
     let caption = theme.type_scale().caption();
     let dim = theme.dim_foreground();
-    let accent = theme.accent();
-
-    let glyph = match entry.kind {
-        Kind::Directory => "\u{f07b}",  // nf-fa-folder
-        Kind::File => "\u{f15b}",       // nf-fa-file
-        Kind::Unresolved => "\u{f127}", // nf-fa-chain_broken
-    };
 
     let size = entry
         .size
         .map(format_size)
         .unwrap_or_else(|| "—".to_string());
     let age = entry.modified.map(format_age).unwrap_or_default();
+    // A change since yesterday is what you are usually looking for in a
+    // directory, so its age is lit in green; older ages recede.
+    let age_color = if is_fresh(entry) {
+        theme.hue(Hue::Green)
+    } else {
+        dim
+    };
 
-    // Accent on the cursor row only, not on every directory. §5's rule is
-    // that accent is scarce — one element per view — and spending it on the
-    // row you are standing on says more than spending it on half the
-    // listing. The folder and file glyphs already differ, so nothing is lost
-    // by letting them share a colour.
-    let mut icon = Icon::new(glyph);
-    if is_cursor {
-        icon = icon.color(accent);
+    // The icon says what the entry *is*, in glyph and in hue: a directory
+    // is blue, a picture magenta, an archive yellow (see `family`). The
+    // colour is information, so the cursor row no longer borrows the accent
+    // for it — the fill and the brighter name are what mark the cursor.
+    let family = Family::of(entry);
+    let mut icon = Icon::new(family.glyph());
+    if let Some(hue) = family.hue() {
+        icon = icon.color(theme.hue(hue));
     }
     // The git marker is composited onto the icon's corner rather than
     // replacing it: the icon says what the entry is and the badge says what
@@ -7448,9 +7483,18 @@ fn entry_row(
                 .flex_shrink_0()
                 .truncate()
                 .text_size(px(caption))
-                .text_color(dim)
+                .text_color(age_color)
                 .child(age),
         )
+}
+
+/// Modified within the last day. What the listing lights the age of.
+fn is_fresh(entry: &Entry) -> bool {
+    const DAY: Duration = Duration::from_secs(86_400);
+    entry
+        .modified
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|elapsed| elapsed < DAY)
 }
 
 // -------------------------------------------------------------- the preview
@@ -7486,17 +7530,26 @@ const PANE_HEX_BYTES: usize = 4;
 /// Only the panel composes all three. The expanded view renders
 /// [`render_body`] on its own, so the shared piece — and the only piece that
 /// takes a [`Target`] — is the body.
-fn render_info(loaded: &Loaded, _cx: &mut App) -> AnyElement {
-    FactSheet::new()
-        .title(loaded.preview.name.clone())
-        .facts(preview_facts(loaded))
-        .into_any_element()
+fn render_info(loaded: &Loaded, cx: &mut App) -> AnyElement {
+    let preview = &loaded.preview;
+    // The kind in the hue its icon wears in the listing, so the sheet and
+    // the row agree about what this is.
+    let family = match &preview.body {
+        Body::Directory { .. } => Family::Directory,
+        _ => Family::of_file(&preview.key.path),
+    };
+    let mut sheet = FactSheet::new().title(preview.name.clone());
+    sheet = match family.hue() {
+        Some(hue) => sheet.fact_in("kind", preview.body.label(), cx.theme().hue(hue)),
+        None => sheet.fact("kind", preview.body.label()),
+    };
+    sheet.facts(preview_facts(loaded)).into_any_element()
 }
 
-/// The fact table under the title. Kind and size always; the rest per body.
+/// The fact table under the kind. Size always; the rest per body.
 fn preview_facts(loaded: &Loaded) -> Vec<(String, String)> {
     let preview = &loaded.preview;
-    let mut facts = vec![("kind".to_string(), preview.body.label().to_string())];
+    let mut facts = Vec::new();
 
     if preview.is_symlink {
         facts.push(("link".to_string(), "symlink".to_string()));
