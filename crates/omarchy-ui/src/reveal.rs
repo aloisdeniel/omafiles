@@ -96,8 +96,8 @@ impl RevealStyle {
         Self {
             color: theme.foreground(),
             reach: theme.space().control_height() * 3.0,
-            strength: 0.10,
-            grain: 0.04,
+            strength: 0.06,
+            grain: 0.03,
         }
     }
 
