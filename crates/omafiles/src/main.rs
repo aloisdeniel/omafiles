@@ -1124,12 +1124,12 @@ enum Pane {
     Listing,
 }
 
-/// The two draggable boundaries in the listing header, as
-/// [`ColumnResize`] indexes them: the grip before the size column, then
-/// the one before the age column. The name column takes whatever is left,
+/// The draggable boundaries in the listing header, as [`ColumnResize`]
+/// indexes them. The name column takes whatever is left,
 /// so it has no width of its own to drag.
-const SIZE_DIVIDER: usize = 0;
-const AGE_DIVIDER: usize = 1;
+const KIND_DIVIDER: usize = 0;
+const SIZE_DIVIDER: usize = 1;
+const AGE_DIVIDER: usize = 2;
 
 /// The narrowest a listing column can be dragged: room for a label and the
 /// glyph after it. Below that the column says nothing, and the values in it
@@ -4968,9 +4968,9 @@ impl Explorer {
 
     // ----------------------------------------------- the listing's columns
 
-    /// The size and age column widths for the directory on screen: what was
+    /// The fixed column widths for the directory on screen: what was
     /// dragged for it, or the built-in widths until then.
-    fn column_widths(&self) -> (f32, f32) {
+    fn column_widths(&self) -> (f32, f32, f32) {
         let view = self.views.get(&self.current_path());
         let width = |asked: Option<u32>, default: f32| {
             asked
@@ -4978,6 +4978,7 @@ impl Explorer {
                 .clamp(COLUMN_MIN, COLUMN_MAX)
         };
         (
+            width(view.kind_width, KIND_COLUMN),
             width(view.size_width, SIZE_COLUMN),
             width(view.age_width, AGE_COLUMN),
         )
@@ -5017,8 +5018,8 @@ impl Explorer {
     }
 
     fn start_column_resize(&mut self, divider: usize, x: f32, cx: &mut Context<Self>) {
-        let (size, age) = self.column_widths();
-        self.column_resizing = Some(ColumnResize::begin(divider, x, vec![size, age]));
+        let (kind, size, age) = self.column_widths();
+        self.column_resizing = Some(ColumnResize::begin(divider, x, vec![kind, size, age]));
         cx.notify();
     }
 
@@ -5031,12 +5032,17 @@ impl Explorer {
             return;
         };
         let widths = resize.widths_at(x, COLUMN_MIN, COLUMN_MAX);
-        let (size, age) = (
+        let (kind, size, age) = (
+            widths[KIND_DIVIDER].round() as u32,
             widths[SIZE_DIVIDER].round() as u32,
             widths[AGE_DIVIDER].round() as u32,
         );
         let mut view = self.views.get(&self.current_path());
-        if view.size_width != Some(size) || view.age_width != Some(age) {
+        if view.kind_width != Some(kind)
+            || view.size_width != Some(size)
+            || view.age_width != Some(age)
+        {
+            view.kind_width = Some(kind);
             view.size_width = Some(size);
             view.age_width = Some(age);
             self.update_view(view, cx);
@@ -5059,22 +5065,24 @@ impl Explorer {
     /// would only invite it to light up as one. It borrows the row's metrics —
     /// height, padding, gap, column widths — so the labels line up with the
     /// values. Each label is a button that sorts by its column, and the rule
-    /// before the size and age labels is a grip that resizes them.
+    /// before each fixed label is a grip that resizes it.
     fn listing_header(&mut self, cx: &mut Context<Self>) -> ColumnHeader {
         let sort = self.views.get(&self.current_path()).sort();
-        let (size_width, age_width) = self.column_widths();
+        let (kind_width, size_width, age_width) = self.column_widths();
         // Column indexes are the sort keys' discriminants, so the two map
         // without a table.
         ColumnHeader::new()
             .leading(cx.theme().icon_column())
             .column(Column::flex("name"))
+            .column(Column::fixed("kind", kind_width))
             .column(Column::fixed("size", size_width))
             .column(Column::fixed("age", age_width))
             .sorted(sort.key as usize, sort.descending)
             .on_sort(cx.listener(|this, event: &SortEvent, _window, cx| {
                 let key = match event.column {
-                    1 => SortKey::Size,
-                    2 => SortKey::Age,
+                    1 => SortKey::Kind,
+                    2 => SortKey::Size,
+                    3 => SortKey::Age,
                     _ => SortKey::Name,
                 };
                 this.click_column(key, cx);
@@ -7387,6 +7395,9 @@ fn drop_refusals(items: &[DragItem], dest: &Path) -> Vec<String> {
     reasons
 }
 
+/// Width of the listing's kind column until the user drags it.
+const KIND_COLUMN: f32 = 88.;
+
 /// Width of the listing's size column until the user drags it; a dragged
 /// width is kept per directory in `views.toml`.
 ///
@@ -7406,17 +7417,17 @@ const AGE_COLUMN: f32 = 48.;
 /// of its own: a marker column would cost width in every directory, and most
 /// directories are not in a repository at all.
 ///
-/// `columns` is the `(size, age)` width pair the header was drawn with.
+/// `columns` is the `(kind, size, age)` width triple the header was drawn with.
 fn entry_row(
     position: usize,
     entry: &Entry,
     is_cursor: bool,
     is_selected: bool,
     git: Option<git::State>,
-    columns: (f32, f32),
+    columns: (f32, f32, f32),
     cx: &mut App,
 ) -> Row {
-    let (size_width, age_width) = columns;
+    let (kind_width, size_width, age_width) = columns;
     let theme = cx.theme();
     let caption = theme.type_scale().caption();
     let dim = theme.dim_foreground();
@@ -7468,6 +7479,15 @@ fn entry_row(
                 .text_color(dim)
                 .child("\u{f0c1}") // nf-fa-link
         }))
+        .child(
+            div()
+                .w(px(kind_width))
+                .flex_shrink_0()
+                .truncate()
+                .text_size(px(caption))
+                .text_color(dim)
+                .child(family.kind_label()),
+        )
         .child(
             div()
                 .w(px(size_width))

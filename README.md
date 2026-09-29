@@ -22,6 +22,9 @@ theme.
 - **Preview.** Images, video posters, markdown, and code through tree-sitter,
   coloured by your palette. Expand it over the listing with `space` and flick
   through files with `j` and `k`.
+- **Sort.** Click Kind to group images, documents, video and other broad file
+  families, or sort by name, size or age. Click the same column again to reverse
+  it; each directory remembers its choice.
 - **Git.** Branch and change counts in the status bar, markers on entry
   icons, and a changed file previews as its diff, rendered as the file rather
   than the patch. Switch branches with `^⇧g`.

@@ -66,7 +66,7 @@ impl Family {
             return Self::Other;
         };
         let extension = extension.as_str();
-        if preview::IMAGES.contains(&extension) {
+        if preview::IMAGES.contains(&extension) || matches!(extension, "heic" | "heif") {
             Self::Image
         } else if preview::VIDEOS.contains(&extension) {
             Self::Video
@@ -88,6 +88,22 @@ impl Family {
             Self::Text
         } else {
             Self::Other
+        }
+    }
+
+    /// The broad kind shown in the listing and used to group its rows.
+    pub fn kind_label(self) -> &'static str {
+        match self {
+            Self::Directory => "Folder",
+            Self::Broken => "Broken link",
+            Self::Image => "Image",
+            Self::Video => "Video",
+            Self::Audio => "Audio",
+            Self::Archive => "Archive",
+            Self::Code => "Code",
+            Self::Text => "Text",
+            Self::Pdf | Self::Document | Self::Spreadsheet | Self::Slides => "Document",
+            Self::Other => "Other",
         }
     }
 
@@ -143,6 +159,7 @@ mod tests {
     #[test]
     fn sorts_by_extension_case_insensitively() {
         assert_eq!(file("photo.JPG"), Family::Image);
+        assert_eq!(file("photo.HEIC"), Family::Image);
         assert_eq!(file("clip.mkv"), Family::Video);
         assert_eq!(file("song.flac"), Family::Audio);
         assert_eq!(file("site.tar.gz"), Family::Archive);
@@ -161,6 +178,13 @@ mod tests {
         // `.gitignore` has no stem; its name is its extension, as the
         // preview reads it.
         assert_eq!(file(".gitignore"), Family::Text);
+    }
+
+    #[test]
+    fn office_formats_share_a_broad_kind() {
+        for file in ["paper.pdf", "letter.docx", "books.xlsx", "talk.pptx"] {
+            assert_eq!(Family::of_file(Path::new(file)).kind_label(), "Document");
+        }
     }
 
     #[test]
