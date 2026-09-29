@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::entry::{Entry, Kind, natural_cmp};
+use crate::family::Family;
 
 /// The column a listing is ordered by.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +18,7 @@ use crate::entry::{Entry, Kind, natural_cmp};
 pub enum SortKey {
     #[default]
     Name,
+    Kind,
     Size,
     Age,
 }
@@ -66,6 +68,7 @@ impl Sort {
         b.kind.is_dir().cmp(&a.kind.is_dir()).then_with(|| {
             let by_key = match self.key {
                 SortKey::Name => Ordering::Equal,
+                SortKey::Kind => Family::of(a).kind_label().cmp(Family::of(b).kind_label()),
                 SortKey::Size => a.size.cmp(&b.size),
                 // Later modification is a smaller age. An entry with no
                 // date (an unresolved link) has no age, and sorts old.
@@ -409,6 +412,48 @@ mod tests {
             descending: true,
         });
         assert_eq!(names_in_order(&listing), ["link", "old", "new"]);
+    }
+
+    #[test]
+    fn kind_sort_groups_broad_families_and_keeps_folders_first() {
+        let t = Tree::new("sortkind");
+        t.file("z-photo.jpg", b"")
+            .file("a-photo.heic", b"")
+            .file("notes.docx", b"")
+            .file("manual.pdf", b"")
+            .file("track.mp3", b"")
+            .dir("folder");
+        let mut listing = Listing::read(&t.0);
+        listing.sort(Sort {
+            key: SortKey::Kind,
+            descending: false,
+        });
+        assert_eq!(
+            names_in_order(&listing),
+            [
+                "folder",
+                "track.mp3",
+                "manual.pdf",
+                "notes.docx",
+                "a-photo.heic",
+                "z-photo.jpg",
+            ]
+        );
+        listing.sort(Sort {
+            key: SortKey::Kind,
+            descending: true,
+        });
+        assert_eq!(
+            names_in_order(&listing),
+            [
+                "folder",
+                "z-photo.jpg",
+                "a-photo.heic",
+                "notes.docx",
+                "manual.pdf",
+                "track.mp3",
+            ]
+        );
     }
 
     #[test]

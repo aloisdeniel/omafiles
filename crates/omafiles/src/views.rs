@@ -1,5 +1,5 @@
 //! `~/.config/omafiles/views.toml`: how each directory's listing is laid
-//! out — the column it is sorted by, and how wide the size and age columns
+//! out — the column it is sorted by, and how wide the fixed columns
 //! were dragged.
 //!
 //! Per directory rather than global because the two questions have
@@ -31,6 +31,9 @@ use crate::listing::{Sort, SortKey};
 pub struct DirectoryView {
     pub sort: SortKey,
     pub descending: bool,
+    /// The kind column's width, as last dragged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind_width: Option<u32>,
     /// The size column's width in logical pixels, as last dragged. Absent
     /// until then, so the built-in width stands in.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,6 +149,7 @@ mod tests {
         let downloads = DirectoryView {
             sort: SortKey::Age,
             descending: false,
+            kind_width: None,
             size_width: Some(96),
             age_width: None,
         };
@@ -153,8 +157,8 @@ mod tests {
         views.set(
             Path::new("/home/me/src"),
             DirectoryView {
-                sort: SortKey::Name,
-                descending: true,
+                sort: SortKey::Kind,
+                kind_width: Some(104),
                 ..Default::default()
             },
         );
@@ -163,6 +167,8 @@ mod tests {
         let text = std::fs::read_to_string(dir.join("omafiles/views.toml")).unwrap();
         assert!(text.contains("[\"/home/me/Downloads\"]"), "{text}");
         assert!(text.contains("sort = \"age\""), "{text}");
+        assert!(text.contains("sort = \"kind\""), "{text}");
+        assert!(text.contains("kind_width = 104"), "{text}");
         assert!(
             !text.contains("age_width"),
             "an unset width is not written: {text}"
@@ -218,6 +224,7 @@ mod tests {
         let view = Views::load(&dir).get(Path::new("/a"));
         assert_eq!(view.sort, SortKey::Size);
         assert!(!view.descending);
+        assert_eq!(view.kind_width, None);
         assert_eq!(view.size_width, None);
     }
 }
